@@ -1,0 +1,29 @@
+appId: com.arsnote.app
+productName: Ars-note
+copyright: Copyright © 2026 Arshis
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+extraMetadata:
+  main: dist-electron/main.js
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: build/icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Ars-note
+  artifactName: Ars-note-Setup-${version}.${ext}
+fileAssociations:
+  - ext: md
+    name: Markdown
+    description: Markdown File

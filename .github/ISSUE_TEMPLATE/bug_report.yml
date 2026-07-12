@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible Ars-note problem without sharing private Vault data.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste API keys, private documents, Vault contents, or unredacted diagnostics.
+  - type: input
+    id: version
+    attributes:
+      label: Ars-note version
+      placeholder: 1.5.64
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor and preview
+        - AI assistant
+        - Live Sync
+        - Team workspace
+        - Graph or Canvas
+        - Installation or startup
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use a test Vault and remove private information.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, NAS model, Docker version, and network method when relevant.

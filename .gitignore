@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+server/node_modules/
+/server/node_modules
+
+# Generated builds and test output
+dist/
+dist-electron/
+dist-test/
+public/dist/
+server/dist/
+coverage/
+*.tsbuildinfo
+
+# Packaged releases and archives
+release/
+release-*/
+*.exe
+*.exe.blockmap
+*.zip
+*.tar.gz
+
+# Runtime data and local workspaces
+.codex-tmp/
+server-data/
+server/server-data/
+server/server-backups/
+*.pid
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+.ai-config.json
+*.pem
+*.key
+*.pfx
+*.p12
+*.secret
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# One-off local migration helpers and internal QA notes
+/fix_*.py
+/QA_*_REPORT.md
+/PACKAGING_TEST.md
+/Live Preview 测试文档.md

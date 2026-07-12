@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "dist-test",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "src/utils/markdownTableModel.ts",
+    "src/utils/markdownTableRepair.ts",
+    "src/utils/markdownRenderer.ts",
+    "src/utils/workspaceSession.ts",
+    "src/utils/aiIdentity.ts",
+    "src/utils/gameDesignSpecialists.ts",
+    "src/utils/aiClient.ts",
+    "src/utils/graphInteraction.ts",
+    "src/utils/graphBuilder.ts"
+  ]
+}

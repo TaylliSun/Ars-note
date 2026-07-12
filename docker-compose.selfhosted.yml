@@ -1,0 +1,79 @@
+# Ars-note v1.5.64 self-hosted sync server.
+#
+# Quick start:
+#   cp .env.example .env
+#   # Edit .env — set API key, MinIO credentials
+#   docker compose -f docker-compose.selfhosted.yml up -d
+#
+# Services:
+#   ars-note-sync   — Sync server (port 8787)
+#   minio           — S3-compatible storage (port 9000 API, 9001 Console)
+#
+
+services:
+  ars-note-sync:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: ars-note-sync
+    restart: unless-stopped
+    ports:
+      - "${ARSNOTE_PORT:-8787}:8787"
+    environment:
+      - ARSNOTE_PORT=8787
+      - ARSNOTE_HOST=0.0.0.0
+      - ARS_NOTE_SERVER_API_KEY=${ARS_NOTE_SERVER_API_KEY:?Set ARS_NOTE_SERVER_API_KEY in .env}
+      - ARS_NOTE_REQUIRE_API_KEY=true
+      - ARS_NOTE_STORAGE_BACKEND=${ARS_NOTE_STORAGE_BACKEND:-local}
+      - ARS_NOTE_ALLOW_LEGACY_LIVE_WRITES=${ARS_NOTE_ALLOW_LEGACY_LIVE_WRITES:-false}
+      - ARS_NOTE_MAX_HTTP_BODY_BYTES=${ARS_NOTE_MAX_HTTP_BODY_BYTES:-268435456}
+      - ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES=${ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES:-268435456}
+      - ARS_NOTE_S3_ENDPOINT=${ARS_NOTE_S3_ENDPOINT:-http://minio:9000}
+      - ARS_NOTE_S3_REGION=${ARS_NOTE_S3_REGION:-us-east-1}
+      - ARS_NOTE_S3_BUCKET=${ARS_NOTE_S3_BUCKET:-ars-note-sync}
+      - ARS_NOTE_S3_ACCESS_KEY_ID=${ARS_NOTE_S3_ACCESS_KEY_ID}
+      - ARS_NOTE_S3_SECRET_ACCESS_KEY=${ARS_NOTE_S3_SECRET_ACCESS_KEY}
+      - ARS_NOTE_S3_FORCE_PATH_STYLE=${ARS_NOTE_S3_FORCE_PATH_STYLE:-true}
+    volumes:
+      - ars-note-data:/app/server-data
+    networks:
+      - ars-note-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); http.get('http://localhost:8787/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  minio:
+    profiles: ["s3"]
+    image: minio/minio:latest
+    container_name: ars-note-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data:/data
+    networks:
+      - ars-note-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  ars-note-net:
+    driver: bridge
+
+volumes:
+  ars-note-data:
+    driver: local
+  minio-data:
+    driver: local

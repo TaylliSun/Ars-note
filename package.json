@@ -1,0 +1,112 @@
+{
+  "name": "ars-note",
+  "private": true,
+  "version": "1.5.64",
+  "license": "GPL-3.0-only",
+  "description": "Ars-note - Local-first Markdown knowledge base for game developers",
+  "homepage": "https://github.com/TaylliSun/Ars-note#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TaylliSun/Ars-note.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TaylliSun/Ars-note/issues"
+  },
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "postinstall": "node scripts/copy-excalidraw-assets.mjs",
+    "prebuild": "node scripts/copy-excalidraw-assets.mjs",
+    "dev": "vite",
+    "build": "tsc -p tsconfig.node.json && vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "build:renderer": "vite build",
+    "start": "npm run build && electron .",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "test:compile": "tsc -p tsconfig.test.json && tsc -p tsconfig.node.json && npm --prefix server run build",
+    "test": "npm run test:compile && node --test tests/*.test.cjs",
+    "server:dev": "cd server && npm run dev",
+    "server:build": "cd server && npm run build",
+    "server:start": "cd server && npm start",
+    "server:docker:up": "docker compose -f docker-compose.selfhosted.yml up -d --build",
+    "server:docker:down": "docker compose -f docker-compose.selfhosted.yml down",
+    "server:docker:logs": "docker compose -f docker-compose.selfhosted.yml logs -f ars-note-sync",
+    "server:smoke:selfhosted": "cd server && npm run smoke:selfhosted",
+    "server:docker:rebuild": "docker compose -f docker-compose.selfhosted.yml up -d --build --force-recreate ars-note-sync",
+    "server:ops:backup": "cd server && npm run ops:backup",
+    "server:ops:health": "cd server && npm run ops:health",
+    "server:ops:summary": "cd server && npm run ops:summary",
+    "release:full": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
+    "release:quick": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -SkipInstaller",
+    "release:server": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -SkipInstaller -SkipDesktopBuild",
+    "release:client": "powershell -ExecutionPolicy Bypass -File scripts/release-client.ps1",
+    "release:verify:client": "powershell -ExecutionPolicy Bypass -File scripts/verify-client-release.ps1"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.4",
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/lang-markdown": "^6.3.1",
+    "@codemirror/language": "^6.10.6",
+    "@codemirror/language-data": "^6.5.1",
+    "@codemirror/search": "^6.5.8",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "@codemirror/view": "^6.35.0",
+    "@excalidraw/excalidraw": "0.17.6",
+    "codemirror": "^6.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "chokidar": "^4.0.3",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.taylli.arsnote",
+    "productName": "Ars-note",
+    "copyright": "Copyright 2026 Ars-note",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "license": "LICENSE",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "artifactName": "Ars-note-Setup-${version}.${ext}"
+    },
+    "extraResources": [],
+    "asar": true
+  },
+  "author": "TaylliSun"
+}

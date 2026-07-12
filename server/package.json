@@ -1,0 +1,27 @@
+{
+  "name": "ars-note-sync-server",
+  "private": true,
+  "version": "1.5.64",
+  "license": "GPL-3.0-only",
+  "description": "Ars-note Self-hosted Sync Server \u2014 zero external dependencies",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "npx ts-node src/index.ts",
+    "build": "npx tsc",
+    "start": "node dist/index.js",
+    "typecheck": "npx tsc --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
+    "smoke:selfhosted": "node scripts/smoke-test-selfhosted.mjs",
+    "ops:backup": "node scripts/ops/backup-server-data.mjs",
+    "ops:restore": "node scripts/ops/restore-server-data.mjs",
+    "ops:health": "node scripts/ops/check-server-health.mjs http://localhost:3141",
+    "ops:summary": "node scripts/ops/print-server-summary.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.2",
+    "ts-node": "^10.9.2"
+  },
+  "author": "TaylliSun"
+}

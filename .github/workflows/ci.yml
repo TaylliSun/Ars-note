@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Install server dependencies
+        run: npm --prefix server ci
+
+      - name: Audit dependencies
+        run: |
+          npm audit --audit-level=high
+          npm --prefix server audit --audit-level=high
+
+      - name: Type check
+        run: |
+          npm run typecheck
+          npm --prefix server run typecheck
+
+      - name: Test
+        run: |
+          npm test
+          npm --prefix server test
