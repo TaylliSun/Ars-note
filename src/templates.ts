@@ -215,63 +215,311 @@ ${footZh}` },
 
 { id:'core-gameplay-loop', category:'game-design', folder:'01_GDD', defaultFileName:'GameplayLoop.md',
   nameEn:'Core Gameplay Loop', nameZh:'核心玩法循环',
-  descEn:'Core loop diagram and description', descZh:'核心循环图与描述',
+  descEn:'Production-ready multi-horizon gameplay loop design', descZh:'可验证、可落地的多层核心循环设计',
   contentEn:`# Core Gameplay Loop: {TITLE}
 
-## Loop Description
-1. **Action**: What the player does
-2. **Reward**: What the player gets
-3. **Expansion**: How it grows
+> Owner: Lead / System Design
+> Cross-review: Economy + UX
+> Status: Draft / Review / Approved
 
-## Primary Loop
+## 1. Experience Contract
+
+- **Player promise**: What can the player repeatedly become, master, create, discover, or express?
+- **Target emotion**: What should one successful loop feel like?
+- **Play context**: Platform, input, expected session length, solo/co-op, online/offline.
+- **Core verbs**: 3-7 verbs that carry most play.
+- **Meaningful decisions**: What trade-offs prevent the loop from becoming automatic?
+- **Non-goals**: Experiences this loop is not trying to provide.
+
+### Evidence and Decisions
+
+| Kind | Statement | Source / Owner | Status |
+| --- | --- | --- | --- |
+| Confirmed fact |  | [[GDD]] | Confirmed |
+| Design decision |  | System Design | Proposed |
+| Assumption |  | Playtest needed | Unverified |
+| Open question |  | Owner needed | Blocked |
+
+## 2. Loop Thesis
+
+> Because the player wants **[goal/fantasy]**, they repeatedly **[core verbs]** to gain **[feedback/reward]**, then spend or transform it to make **[new decision/unlock]**, which changes the next round by **[new mastery/expression/stakes]**.
+
+### Canonical Flow
+
 \`\`\`
-Action → Reward → Choice → Action
+Need / Goal
+  → Observe and choose
+  → Commit an action
+  → System resolves rules and risk
+  → Immediate readable feedback
+  → Reward, cost, or consequence
+  → Spend, transform, equip, or unlock
+  → New option, harder goal, or expressive choice
+  ↺ Re-enter with a changed decision
 \`\`\`
 
-## Time Per Loop
-- **Short loop**: seconds
-- **Medium loop**: minutes
-- **Long loop**: hours
+## 3. Connected Loop Horizons
 
-## Retention Mechanics
--
+| Horizon | Expected cadence | Player goal | Entry | Main actions | Output | How it feeds the next horizon |
+| --- | --- | --- | --- | --- | --- | --- |
+| Moment-to-moment | 5-30 seconds |  |  |  |  |  |
+| Encounter / task | 2-10 minutes |  |  |  |  |  |
+| Session | 15-60 minutes |  |  |  |  |  |
+| Meta / progression | Day / week |  |  |  |  |  |
+| Long-term mastery | Weeks / months |  |  |  |  |  |
 
-## Loop Variants
-### Early Game
--
-### Mid Game
--
-### Late Game
--
+> Replace cadence ranges with project evidence. Each row must consume an output or motivation from the row above and return a new decision to it.
+
+## 4. Step Contract
+
+| # | Player intent | Input / action | Rule and state change | Feedback | Reward / cost | Meaningful decision | Failure / recovery | Re-entry condition |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 |  |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |  |
+
+### Loop Integrity Checks
+
+- [ ] Every action changes state and produces readable feedback.
+- [ ] Every reward enables a new decision, mastery opportunity, expression, or stake.
+- [ ] No step is a dead end; interruption, failure, and completion all define re-entry.
+- [ ] Progression strengthens or transforms the core verbs instead of bypassing them.
+- [ ] Repetition changes decisions, not only numeric scale.
+
+## 5. Resource and Progression Topology
+
+| Resource / state | Source | Transformation | Storage / cap | Sink / cost | Gate / unlock | Reset / decay | Exploit pressure |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |
+
+| Phase | New verb / option | New decision | New risk | Content need | Why the loop feels different |
+| --- | --- | --- | --- | --- | --- |
+| Onboarding |  |  |  |  |  |
+| Early game |  |  |  |  |  |
+| Mid game |  |  |  |  |  |
+| Late game |  |  |  |  |  |
+
+## 6. Failure, Recovery, and Return
+
+| Situation | Trigger | Consequence | Preserved progress | Recovery path | Retry cost | Anti-frustration rule |
+| --- | --- | --- | --- | --- | --- | --- |
+| Failure |  |  |  |  |  |  |
+| Interruption / quit |  |  |  |  |  |  |
+| Resource shortage |  |  |  |  |  |  |
+| Invalid / exploit state |  |  |  |  |  |  |
+
+## 7. Feedback and UX
+
+| Loop beat | Visual / animation | SFX / music | UI information | Timing | Accessibility / fallback |
+| --- | --- | --- | --- | --- | --- |
+| Choice |  |  |  |  |  |
+| Commitment |  |  |  |  |  |
+| Resolution |  |  |  |  |  |
+| Reward / consequence |  |  |  |  |  |
+| Re-entry |  |  |  |  |  |
+
+## 8. Dependencies and Content Burden
+
+| Dependency | What the loop needs | Owner | Minimum viable version | Scale cost / risk |
+| --- | --- | --- | --- | --- |
+| System / data |  |  |  |  |
+| Economy / balance |  |  |  |  |
+| Level / quest / content |  |  |  |  |
+| UI / art / audio |  |  |  |  |
+| Engineering / save |  |  |  |  |
+| QA / analytics |  |  |  |  |
+
+## 9. Prototype and Measurement
+
+### Smallest Playable Loop
+
+- **Prototype boundary**:
+- **Required assets**:
+- **Test duration and participants**:
+- **What observers record**:
+- **Pass condition**:
+- **Stop / redesign condition**:
+
+| Hypothesis | Event / observation | Interpretation | Design decision triggered |
+| --- | --- | --- | --- |
+| Players understand the next goal |  |  |  |
+| Choices produce visible trade-offs |  |  |  |
+| Rewards create a reason to re-enter |  |  |  |
+| Failure teaches without erasing motivation |  |  |  |
+
+> Do not invent target metrics. Add numeric thresholds only after a benchmark, prototype, or product decision exists.
+
+## 10. Traceability
+
+| Design goal | Loop rule | Data / config | UI / feedback | Implementation owner | Acceptance / telemetry |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
+## 11. Review Gates
+
+| Gate | Status | Evidence / unresolved issue |
+| --- | --- | --- |
+| Player promise and core verbs | Needs review |  |
+| Cross-horizon re-entry | Needs review |  |
+| Economy and anti-exploit | Needs review |  |
+| UX feedback and accessibility | Needs review |  |
+| Failure, interruption, and save recovery | Needs review |  |
+| Prototype and measurement plan | Needs review |  |
+
+Use only **Passed**, **Needs review**, or **Blocked**. Do not use invented quality scores.
 
 ${foot}`,
   contentZh:`# 核心玩法循环: {TITLE}
 
-## 循环描述
-1. **行动**：玩家做什么
-2. **奖励**：玩家获得什么
-3. **扩展**：如何成长
+> 主责：主策划 / 系统策划
+> 交叉评审：数值策划 + UI/UX 策划
+> 状态：草稿 / 评审 / 已通过
 
-## 主循环
+## 1. 体验契约
+
+- **玩家承诺**：玩家能反复成为什么、掌握什么、创造什么、发现什么或表达什么？
+- **目标情绪**：完成一轮后，玩家应该获得什么感受？
+- **游玩场景**：平台、输入方式、预计单次时长、单人/多人、在线/离线。
+- **核心动词**：承担主要游玩内容的 3-7 个动词。
+- **关键选择**：哪些取舍让循环不会退化为机械点击？
+- **非目标**：本循环明确不提供哪些体验？
+
+### 事实与决策
+
+| 类型 | 内容 | 依据 / 负责人 | 状态 |
+| --- | --- | --- | --- |
+| 已确认事实 |  | [[GDD]] | 已确认 |
+| 设计决策 |  | 系统策划 | 待评审 |
+| 假设 |  | 需要试玩验证 | 未验证 |
+| 开放问题 |  | 待指定负责人 | 阻塞 |
+
+## 2. 循环命题
+
+> 因为玩家想要 **[目标/幻想]**，所以会反复使用 **[核心动词]** 获得 **[反馈/奖励]**，再将其消耗或转化为 **[新选择/解锁]**，使下一轮产生 **[新的熟练度、表达空间或风险]**。
+
+### 标准流程
+
 \`\`\`
-行动 → 奖励 → 选择 → 行动
+需求 / 目标
+  → 观察并选择
+  → 承诺一次行动
+  → 系统结算规则与风险
+  → 立即且清晰的反馈
+  → 获得奖励、成本或后果
+  → 消耗、转化、装备或解锁
+  → 出现新选项、更高目标或表达选择
+  ↺ 带着变化后的决策重新进入
 \`\`\`
 
-## 每次循环时长
-- **短循环**：秒
-- **中循环**：分钟
-- **长循环**：小时
+## 3. 多层循环关系
 
-## 留存机制
--
+| 层级 | 参考节奏 | 玩家目标 | 入口 | 主要行动 | 产出 | 如何进入下一层 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 秒级操作循环 | 5-30 秒 |  |  |  |  |  |
+| 遭遇 / 任务循环 | 2-10 分钟 |  |  |  |  |  |
+| 单次会话循环 | 15-60 分钟 |  |  |  |  |  |
+| 局外 / 成长循环 | 天 / 周 |  |  |  |  |  |
+| 长期掌握循环 | 周 / 月 |  |  |  |  |  |
 
-## 循环变体
-### 前期
--
-### 中期
--
-### 后期
--
+> 节奏区间必须按项目证据调整。每一层都要承接上一层的产出或动机，并向上一层返回一个新的决策。
+
+## 4. 单步契约
+
+| # | 玩家意图 | 输入 / 行动 | 规则与状态变化 | 反馈 | 奖励 / 成本 | 关键选择 | 失败 / 恢复 | 重入条件 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 |  |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |  |
+
+### 闭环检查
+
+- [ ] 每个行动都会改变状态并产生可读反馈。
+- [ ] 每个奖励都会开启新的决策、熟练度、表达空间或风险。
+- [ ] 没有死路；中断、失败和完成都定义了重入方式。
+- [ ] 成长会强化或改变核心动词，而不是绕过核心玩法。
+- [ ] 重复带来决策变化，而不只是数字变大。
+
+## 5. 资源与成长拓扑
+
+| 资源 / 状态 | 来源 | 转化 | 储存 / 上限 | 消耗 | 门槛 / 解锁 | 重置 / 衰减 | 套利风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |
+
+| 阶段 | 新动词 / 新选项 | 新决策 | 新风险 | 内容需求 | 循环为何产生变化 |
+| --- | --- | --- | --- | --- | --- |
+| 新手期 |  |  |  |  |  |
+| 前期 |  |  |  |  |  |
+| 中期 |  |  |  |  |  |
+| 后期 |  |  |  |  |  |
+
+## 6. 失败、恢复与返回
+
+| 情况 | 触发条件 | 后果 | 保留进度 | 恢复路径 | 重试成本 | 防挫败规则 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 失败 |  |  |  |  |  |  |
+| 中断 / 退出 |  |  |  |  |  |  |
+| 资源不足 |  |  |  |  |  |  |
+| 非法 / 套利状态 |  |  |  |  |  |  |
+
+## 7. 反馈与 UX
+
+| 循环节拍 | 视觉 / 动画 | 音效 / 音乐 | UI 信息 | 时机 | 无障碍 / 降级方案 |
+| --- | --- | --- | --- | --- | --- |
+| 选择 |  |  |  |  |  |
+| 承诺行动 |  |  |  |  |  |
+| 规则结算 |  |  |  |  |  |
+| 奖励 / 后果 |  |  |  |  |  |
+| 重新进入 |  |  |  |  |  |
+
+## 8. 依赖与内容成本
+
+| 依赖 | 循环需要什么 | 负责人 | 最小可用版本 | 扩量成本 / 风险 |
+| --- | --- | --- | --- | --- |
+| 系统 / 数据 |  |  |  |  |
+| 数值 / 经济 |  |  |  |  |
+| 关卡 / 任务 / 内容 |  |  |  |  |
+| UI / 美术 / 音频 |  |  |  |  |
+| 程序 / 存档 |  |  |  |  |
+| QA / 数据分析 |  |  |  |  |
+
+## 9. 原型与验证
+
+### 最小可玩循环
+
+- **原型边界**：
+- **必需资产**：
+- **测试时长与人数**：
+- **观察记录项**：
+- **通过条件**：
+- **停止 / 重做条件**：
+
+| 假设 | 事件 / 观察项 | 结果解释 | 触发的设计决策 |
+| --- | --- | --- | --- |
+| 玩家能理解下一个目标 |  |  |  |
+| 选择能产生清晰取舍 |  |  |  |
+| 奖励能形成再次进入的理由 |  |  |  |
+| 失败能教学且不会清空动机 |  |  |  |
+
+> 不要凭空编造目标指标。只有存在基准、原型结果或明确产品决策时，才填写数值阈值。
+
+## 10. 可追溯矩阵
+
+| 设计目标 | 循环规则 | 数据 / 配置 | UI / 反馈 | 实现负责人 | 验收 / 埋点 |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
+## 11. 评审门
+
+| 评审项 | 状态 | 证据 / 未解决问题 |
+| --- | --- | --- |
+| 玩家承诺与核心动词 | 待评审 |  |
+| 多层循环重入关系 | 待评审 |  |
+| 经济闭环与防套利 | 待评审 |  |
+| UX 反馈与无障碍 | 待评审 |  |
+| 失败、中断与存档恢复 | 待评审 |  |
+| 原型与验证计划 | 待评审 |  |
+
+状态只使用 **已通过**、**待评审** 或 **阻塞**，不要编造“100/100”等质量分。
 
 ${footZh}` },
 

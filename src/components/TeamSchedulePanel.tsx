@@ -9,6 +9,7 @@ import type {
   TeamServerProductionStatus,
 } from '../types';
 import { ClockIcon, FileIcon, PlusIcon, RefreshIcon, SearchIcon, CloseIcon } from './icons/ArsIcons';
+import { createDebouncedLatestWriter } from '../utils/debouncedLatestWriter';
 
 type TeamTaskStatus = 'todo' | 'doing' | 'review' | 'blocked' | 'done';
 type TeamTaskPriority = 'high' | 'medium' | 'low';
@@ -636,6 +637,13 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     }
   });
   const newTaskInputRef = useRef<HTMLInputElement>(null);
+  const dataRef = useRef(data);
+  const currentMemberRef = useRef(currentMember);
+  const activeScheduleVaultPathRef = useRef(vaultPath);
+  const scheduleWriteRevisionRef = useRef(0);
+  dataRef.current = data;
+  currentMemberRef.current = currentMember;
+  activeScheduleVaultPathRef.current = vaultPath;
 
   const documentPaths = useMemo(() => collectDocumentPaths(fileTree, vaultPath), [fileTree, vaultPath]);
   const documentPathSet = useMemo(() => createDocumentPathSet(documentPaths), [documentPaths]);
@@ -647,25 +655,84 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     return api.joinPath(vaultPath, SCHEDULE_DIR, SCHEDULE_FILE);
   }, [vaultPath]);
 
+  const persistData = useCallback(async (next: TeamScheduleData) => {
+    const fullPath = await schedulePath();
+    await api.writeFile(fullPath, JSON.stringify(next, null, 2));
+  }, [schedulePath]);
+
+  const reportScheduleWriteError = useCallback((error: unknown) => {
+    if (activeScheduleVaultPathRef.current !== vaultPath) return;
+    const message = error instanceof Error ? error.message : String(error || '保存团队时间表失败');
+    setSaveState('error');
+    setExportMsg(message || '保存团队时间表失败');
+  }, [vaultPath]);
+
+  const scheduleWriter = useMemo(() => {
+    const writerVaultPath = vaultPath;
+    return createDebouncedLatestWriter<{ data: TeamScheduleData; revision: number }>(async (payload) => {
+      await persistData(payload.data);
+      if (
+        activeScheduleVaultPathRef.current === writerVaultPath
+        && payload.revision === scheduleWriteRevisionRef.current
+      ) {
+        setSaveState('saved');
+      }
+    }, 450, reportScheduleWriteError);
+  }, [persistData, reportScheduleWriteError, vaultPath]);
+
+  const flushScheduleWrites = useCallback(async () => {
+    try {
+      await scheduleWriter.flush();
+    } catch (error) {
+      reportScheduleWriteError(error);
+      throw error;
+    }
+  }, [reportScheduleWriteError, scheduleWriter]);
+
   const loadSchedule = useCallback(async () => {
     if (!vaultPath) return;
     setLoading(true);
     try {
+      await flushScheduleWrites();
       const fullPath = await schedulePath();
       const content = await api.readFile(fullPath);
-      setData(normalizeScheduleData(JSON.parse(content), currentMember));
+      const next = normalizeScheduleData(JSON.parse(content), currentMemberRef.current);
+      dataRef.current = next;
+      setData(next);
       setSaveState('saved');
-    } catch {
-      setData(createEmptySchedule(currentMember));
+    } catch (error) {
+      if (scheduleWriter.hasPending()) {
+        reportScheduleWriteError(error);
+        return;
+      }
+      const next = createEmptySchedule(currentMemberRef.current);
+      dataRef.current = next;
+      setData(next);
       setSaveState('idle');
     } finally {
       setLoading(false);
     }
-  }, [currentMember, schedulePath, vaultPath]);
+  }, [flushScheduleWrites, reportScheduleWriteError, schedulePath, scheduleWriter, vaultPath]);
 
   useEffect(() => {
     void loadSchedule();
   }, [loadSchedule]);
+
+  useEffect(() => {
+    const flush = () => { void flushScheduleWrites().catch(() => {}); };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('blur', flush);
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', flush);
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      void flushScheduleWrites().catch(() => {});
+    };
+  }, [flushScheduleWrites, scheduleWriter]);
 
   useEffect(() => {
     if (currentMember.trim()) localStorage.setItem('ars-note.team.currentMember', currentMember.trim());
@@ -693,24 +760,23 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     else localStorage.removeItem('ars-note.team.activeSession');
   }, [activeSession]);
 
-  const persistData = useCallback(async (next: TeamScheduleData) => {
-    setSaveState('saving');
-    const fullPath = await schedulePath();
-    await api.writeFile(fullPath, JSON.stringify(next, null, 2));
-    setSaveState('saved');
-  }, [schedulePath]);
-
   const commitData = useCallback((updater: (previous: TeamScheduleData) => TeamScheduleData) => {
-    setData((previous) => {
-      const next = updater(previous);
-      const normalized = normalizeScheduleData({ ...next, updatedAt: nowIso() }, currentMember);
-      void persistData(normalized).catch((error) => {
-        setSaveState('error');
-        setExportMsg(error?.message || '保存团队时间表失败');
-      });
-      return normalized;
-    });
-  }, [currentMember, persistData]);
+    const next = updater(dataRef.current);
+    const normalized = normalizeScheduleData({ ...next, updatedAt: nowIso() }, currentMember);
+    const revision = scheduleWriteRevisionRef.current + 1;
+    scheduleWriteRevisionRef.current = revision;
+    dataRef.current = normalized;
+    setData(normalized);
+    setSaveState('saving');
+    scheduleWriter.schedule({ data: normalized, revision });
+  }, [currentMember, scheduleWriter]);
+
+  const applyExternalScheduleData = useCallback((next: TeamScheduleData) => {
+    scheduleWriteRevisionRef.current += 1;
+    dataRef.current = next;
+    setData(next);
+    setSaveState('saved');
+  }, []);
 
   const refreshServerStatus = useCallback(async (showMessage = false) => {
     if (!vaultPath) return;
@@ -760,6 +826,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     setLiveSyncTesting(true);
     setBusy('sync-drill');
     try {
+      await flushScheduleWrites();
       const health = await api.liveSyncHealth(vaultPath).catch(() => null);
       if (health) setLiveSyncHealth(health);
       const result = await api.liveSyncSelfTest(vaultPath);
@@ -776,7 +843,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
       setLiveSyncTesting(false);
       setBusy('');
     }
-  }, [vaultPath]);
+  }, [flushScheduleWrites, vaultPath]);
 
   const openServerAdmin = useCallback(async () => {
     const endpoint = serverStatus?.endpoint
@@ -826,6 +893,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     if (!confirmed) return;
     setScheduleHistoryBusy(item.versionId);
     try {
+      await flushScheduleWrites();
       await api.restoreLiveHistory(vaultPath, SCHEDULE_RELATIVE_PATH, item.versionId);
       await loadSchedule();
       await refreshScheduleHistory(false);
@@ -836,7 +904,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     } finally {
       setScheduleHistoryBusy('');
     }
-  }, [loadSchedule, onRefreshVault, refreshScheduleHistory, vaultPath]);
+  }, [flushScheduleWrites, loadSchedule, onRefreshVault, refreshScheduleHistory, vaultPath]);
 
   const members = useMemo(() => {
     const names = new Set<string>(data.members);
@@ -1247,12 +1315,12 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const applyGeneratedTaskSchedule = async (content: unknown): Promise<TeamScheduleData | null> => {
     if (typeof content !== 'string' || !content.trim()) return null;
     const next = normalizeScheduleData(JSON.parse(content), currentMember);
-    setData(next);
-    setSaveState('saved');
+    applyExternalScheduleData(next);
     return next;
   };
 
   const refreshTaskWorkDocsFromMain = async () => {
+    await flushScheduleWrites();
     const generated = await api.generateTeamProductionDocs(vaultPath, productionDocSubset({ includeTaskDocs: true }));
     const taskDocs = generated?.summary?.taskDocs || {};
     const schedule = await applyGeneratedTaskSchedule(taskDocs.content);
@@ -1314,10 +1382,10 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const syncLinkedTaskDocs = async () => {
     setBusy('sync-docs');
     try {
+      await flushScheduleWrites();
       const result = await api.syncTeamTaskDocs(vaultPath, currentMember || undefined);
       const next = normalizeScheduleData(JSON.parse(result.content), currentMember);
-      setData(next);
-      setSaveState('saved');
+      applyExternalScheduleData(next);
       await onRefreshVault?.();
       setExportMsg(`同步任务文档完成：扫描 ${result.scannedCount}，变更 ${result.changedCount}，新增工时 ${result.addedLogCount}，新增验收 ${result.addedReviewCount}。`);
     } catch (error: any) {
@@ -1330,6 +1398,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const refreshProductionDocsAndOpen = async (label: string, targetPath: string, options: TeamProductionDocOptions) => {
     setBusy(label);
     try {
+      await flushScheduleWrites();
       const generated = await api.generateTeamProductionDocs(vaultPath, options);
       await onRefreshVault?.();
       setExportMsg(`已刷新 ${generated.paths.length} 个团队文档。`);
@@ -1360,9 +1429,10 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const bootstrapWorkspace = async () => {
     setBusy('bootstrap');
     try {
+      await flushScheduleWrites();
       const result = await api.bootstrapTeamWorkspace(vaultPath, { currentMember: currentMember || undefined, limit: 48 });
       const content = result.content || result.upsert?.content;
-      if (content) setData(normalizeScheduleData(JSON.parse(content), currentMember));
+      if (content) applyExternalScheduleData(normalizeScheduleData(JSON.parse(content), currentMember));
       await onRefreshVault?.();
       setExportMsg(`团队工作台已准备好：任务 ${result.taskCount}，生成文档 ${result.productionDocs?.paths?.length || 0} 个。`);
     } catch (error: any) {
@@ -1376,6 +1446,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     if (!onImportCurrentDocumentTasks) return;
     setBusy('import-current');
     try {
+      await flushScheduleWrites();
       const result = await onImportCurrentDocumentTasks();
       await loadSchedule();
       await onRefreshVault?.();
@@ -1393,8 +1464,9 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
       if (upsert && !window.confirm('AI 将把叙事草稿写入团队时间表。建议优先使用“预演 AI 接管”查看会新增/更新哪些任务。确定继续吗？')) {
         return;
       }
+      await flushScheduleWrites();
       const result = await api.draftNarrativeTasks(vaultPath, { limit: 40, includeQa: true, upsert, sourceLabel: '叙事导演' });
-      if (result.upsert?.content) setData(normalizeScheduleData(JSON.parse(result.upsert.content), currentMember));
+      if (result.upsert?.content) applyExternalScheduleData(normalizeScheduleData(JSON.parse(result.upsert.content), currentMember));
       if (result.upsert) setAiTakeoverPreview(null);
       await api.generateTeamProductionDocs(vaultPath, allProductionDocs());
       await onRefreshVault?.();
@@ -1409,6 +1481,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const previewAiTakeoverSchedule = async () => {
     setBusy('ai-takeover-preview');
     try {
+      await flushScheduleWrites();
       const drafted = await api.draftNarrativeTasks(vaultPath, {
         limit: 60,
         includeQa: true,
@@ -1502,15 +1575,16 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     setBusy('ai-takeover');
     let syncSummary = '';
     try {
+      await flushScheduleWrites();
       try {
         const synced = await api.syncTeamTaskDocs(vaultPath, currentMember || undefined);
-        if (synced.content) setData(normalizeScheduleData(JSON.parse(synced.content), currentMember));
+        if (synced.content) applyExternalScheduleData(normalizeScheduleData(JSON.parse(synced.content), currentMember));
         syncSummary = `任务文档同步：扫描 ${synced.scannedCount}，变更 ${synced.changedCount}`;
       } catch (syncError: any) {
         syncSummary = `任务文档同步跳过：${formatTeamServerError(syncError)}`;
       }
       const upserted = await api.upsertTeamTasks(vaultPath, aiTakeoverPreview.result.tasks as NarrativeTaskDraft[], 'AI 接管时间表');
-      if (upserted.content) setData(normalizeScheduleData(JSON.parse(upserted.content), currentMember));
+      if (upserted.content) applyExternalScheduleData(normalizeScheduleData(JSON.parse(upserted.content), currentMember));
       const generated = await api.generateTeamProductionDocs(vaultPath, allProductionDocs());
       await refreshServerStatus(false);
       await onRefreshVault?.();
@@ -1526,6 +1600,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
 
   const exportSchedule = async (kind: 'json' | 'csv' | 'report') => {
     try {
+      await flushScheduleWrites();
       const defaultName = kind === 'json' ? 'team-schedule.json' : kind === 'csv' ? 'team-schedule.csv' : 'team-schedule-report.md';
       const target = await api.showSaveDialog(defaultName);
       if (!target) return;

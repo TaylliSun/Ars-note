@@ -171,6 +171,8 @@ const api = {
     ipcRenderer.invoke('ai:testConnection', vaultPath),
   sendAIChat: (vaultPath: string, messages: Array<{ role: string; content: string }>, options?: any) =>
     ipcRenderer.invoke('ai:sendChat', vaultPath, messages, options),
+  cancelAIChat: (requestId: string) =>
+    ipcRenderer.invoke('ai:cancelChat', requestId),
   aiSafetySelfTest: (vaultPath: string) =>
     ipcRenderer.invoke('ai:safetySelfTest', vaultPath),
   aiListOperationAudit: (vaultPath: string, limit?: number) =>

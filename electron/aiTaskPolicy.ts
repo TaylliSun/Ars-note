@@ -4,6 +4,7 @@ export type AITaskPrimary =
   | 'markdown-spec'
   | 'markdown-repair'
   | 'humanize'
+  | 'terminology-migration'
   | 'canvas'
   | 'wireframe'
   | 'file-operation'
@@ -38,9 +39,12 @@ const TEAM_KEYWORD_RE = /(?:团队|成员|排期|时间表|任务表|任务文�
 const TEAM_ACTION_RE = /(?:创建|生成|更新|分配|导入|补齐|初始化|接管|同步任务|create|generate|update|assign|bootstrap|take\s*over)/i;
 const FILE_OPERATION_RE = /(?:删除|移除|清理|重命名|移动|覆盖|修改|更新|写入|追加|保存到|delete|remove|rename|move|overwrite|edit|append|write\s+to)/i;
 const FILE_TARGET_RE = /(?:文件|文档|目录|文件夹|\.md\b|\.json\b|\.canvas\b|\.excalidraw\b|file|folder|document)/i;
+const TERMINOLOGY_MIGRATION_ACTION_RE = /(?:改为|改成|替换为|统一为|统一成|重命名为|旧称|原来.+现在|现在(?:改)?(?:叫|是)|rename|replace|terminology|canonical\s+name)/i;
+const TERMINOLOGY_MIGRATION_SCOPE_RE = /(?:全库|全项目|全部|所有|其他文档|部分文档|跨文档|一致|残留|遗漏|仍然|同步更新|术语|设定|canon|cross[-\s]*document|vault[-\s]*wide)/i;
 
 const MUTATION_TOOLS = new Set([
   'write_file',
+  'refactor_vault_term',
   'delete_file',
   'delete_files',
   'create_folder',
@@ -83,6 +87,11 @@ export function hasMarkdownRepairIntent(prompt: string): boolean {
 
 export function hasHumanizerIntent(prompt: string): boolean {
   return /(?:humanize|de-?ai|ai[-\s]*sounding|robotic|natural(?:ly)?|human(?:\s+voice|\s+written)?|去\s*AI\s*味|去ai味|不像AI|像人写|更自然|自然一点|润色|改写|重写|人话|别太AI|机器味|文风)/i.test(prompt || '');
+}
+
+export function hasTerminologyMigrationIntent(prompt: string): boolean {
+  const text = prompt || '';
+  return TERMINOLOGY_MIGRATION_ACTION_RE.test(text) && TERMINOLOGY_MIGRATION_SCOPE_RE.test(text);
 }
 
 function hasWrittenSpecIntent(prompt: string): boolean {
@@ -138,13 +147,15 @@ export function buildAITaskPolicy(prompt: string, controlMode: AIControlMode = '
   const wantsMarkdownRepair = hasMarkdownRepairIntent(text);
   const wantsHumanizer = hasHumanizerIntent(text);
   const wantsSpec = hasWrittenSpecIntent(text);
+  const wantsTerminologyMigration = hasTerminologyMigrationIntent(text);
   const explicitCanvas = hasStrictCanvasCreationIntent(text);
   const explicitWireframe = hasStrictWireframeCreationIntent(text) && !wantsSpec;
   const teamOperation = hasTeamOperationIntent(text);
   const fileOperation = hasFileOperationIntent(text);
 
   let primary: AITaskPrimary = 'direct-answer';
-  if (wantsMarkdownRepair && !explicitCanvas) primary = 'markdown-repair';
+  if (wantsTerminologyMigration && !explicitCanvas) primary = 'terminology-migration';
+  else if (wantsMarkdownRepair && !explicitCanvas) primary = 'markdown-repair';
   else if (wantsHumanizer && !explicitCanvas) primary = 'humanize';
   else if (teamOperation) primary = 'team-operation';
   else if (fileOperation) primary = 'file-operation';
@@ -172,6 +183,14 @@ export function buildAITaskPolicy(prompt: string, controlMode: AIControlMode = '
 
   if (primary === 'markdown-repair') {
     lines.push('Repair contract: read the target Markdown file first, preserve its meaning, write back to the same .md path, and verify that the resulting table/Markdown is structurally valid.');
+  } else if (primary === 'terminology-migration') {
+    lines.push(
+      'Terminology migration contract: treat this as a vault-wide design-canon change, not a single-file edit.',
+      'Required sequence: search_vault_text(old term) -> classify every hit -> refactor_vault_term with an explicit Markdown path list -> search_vault_text(old term) again.',
+      'Update downstream GDD, worldbuilding, character, map, item, quest, dialogue, performance, UI, task, and technical documents when the old concept is used as current canon.',
+      'Preserve historical quotations, changelogs, source code, identifiers, file names, and fenced code blocks unless the user explicitly asks to change them.',
+      'Do not claim completion while unexplained old-term matches remain. Report changed paths, replacement count, preserved matches, and residual paths.',
+    );
   } else if (primary === 'humanize') {
     lines.push('Humanizer contract: preserve facts, links, tables, code, task IDs, and acceptance criteria; write back only when asked and never create visual artifacts.');
   } else if (primary === 'markdown-spec') {
@@ -230,6 +249,25 @@ export function evaluateAIToolCall(
   }
   if (name === 'create_wireframe' && !policy.allowWireframe) {
     return { allowed: false, reason: 'Wireframe creation is unrelated to the current task contract.' };
+  }
+  if (name === 'refactor_vault_term') {
+    if (policy.primary !== 'terminology-migration') {
+      return { allowed: false, reason: 'Vault-wide terminology refactoring requires an explicit cross-document terminology migration request.' };
+    }
+    const from = String((args as any).from || (args as any).source || '');
+    const paths = Array.isArray((args as any).paths)
+      ? (args as any).paths
+      : String((args as any).paths || '').trim();
+    if (!from.trim() || (Array.isArray(paths) ? paths.length === 0 : !paths)) {
+      return { allowed: false, reason: 'Terminology refactoring requires a source term and an explicit Markdown path list.' };
+    }
+    const searchedFirst = priorCalls.some(call => (
+      call.name === 'search_vault_text'
+      && String((call.args as any)?.query || (call.args as any)?.term || '').trim() === from.trim()
+    ));
+    if (!searchedFirst) {
+      return { allowed: false, reason: 'Search the entire vault for the old term before applying a terminology migration.' };
+    }
   }
   if (TEAM_TOOLS.has(name) && !policy.allowTeamTools) {
     return { allowed: false, reason: 'Team-wide production tools require an explicit team operation in Producer mode.' };

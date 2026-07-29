@@ -10,10 +10,13 @@ import { useI18n } from '../i18n';
 import { buildGameWorkspaceDashboard, filterGameWorkspaceEntries, getGameWorkspaceOwners, groupGameWorkspaceEntriesByStatus, groupGameWorkspaceEntriesByType } from '../utils/gameWorkspaceScanner';
 import { buildGameWorkspaceReportMarkdown } from '../utils/gameWorkspaceReport';
 import { QUICK_PROMPTS } from '../utils/aiClient';
+import { getAIChatScrollToken } from '../utils/aiChatPresentation';
+import { splitSearchHighlight } from '../utils/searchHighlight';
 import { getCategoryIcon, getRightPanelTabIcon, getGameDocIcon } from './icons/iconMap';
 import OutlineView from './OutlineView';
 import ProductionCommandCenter from './ProductionCommandCenter';
 import AIContextMeter from './AIContextMeter';
+import AIChatMessageList, { useAIChatAutoScroll } from './AIChatMessageList';
 import { APP_VERSION_LABEL } from '../appVersion';
 
 const GraphView = React.lazy(() => import('./GraphView'));
@@ -715,11 +718,15 @@ interface RightPanelProps {
   aiControlMode: AIControlMode;
   aiContextUsage: AIContextUsage;
   aiSending: boolean;
+  aiCanCancel: boolean;
+  aiCanRetry: boolean;
   aiCopiedResponse: boolean;
   onAIInputChange: (value: string) => void;
   onAIContextModeChange: (mode: AIContextMode) => void;
   onAIControlModeChange: (mode: AIControlMode) => void;
   onAISendChat: (prompt: string) => Promise<void>;
+  onAICancelChat: () => Promise<void>;
+  onAIRetryLast: () => Promise<void>;
   onAICopyResponse: () => void;
   onAIImportTasksToSchedule?: () => Promise<void>;
   onRefreshVault?: () => Promise<void>;
@@ -921,8 +928,8 @@ const RightPanel: React.FC<RightPanelProps> = ({
   arshisConfig, onArshisConfigChange, onArshisExportGameContext, arshisExporting, arshisExportMsg,
   aiConfig, onAISaveConfig, onAITestConnection, onAIClearConfig, aiTesting, aiTestResult,
   aiFormProvider, aiFormBaseUrl, aiFormModel, aiFormApiKey, onAIFormChange,
-  aiChatMessages, aiInput, aiContextMode, aiControlMode, aiContextUsage, aiSending, aiCopiedResponse,
-  onAIInputChange, onAIContextModeChange, onAIControlModeChange, onAISendChat, onAICopyResponse, onAIImportTasksToSchedule, onRefreshVault,
+  aiChatMessages, aiInput, aiContextMode, aiControlMode, aiContextUsage, aiSending, aiCanCancel, aiCanRetry, aiCopiedResponse,
+  onAIInputChange, onAIContextModeChange, onAIControlModeChange, onAISendChat, onAICancelChat, onAIRetryLast, onAICopyResponse, onAIImportTasksToSchedule, onRefreshVault,
   vaultIndex,
   onJumpToLine,
   onReloadCurrentFile,
@@ -951,6 +958,8 @@ const RightPanel: React.FC<RightPanelProps> = ({
   const [versionHistoryAdvancedOpen, setVersionHistoryAdvancedOpen] = useState(false);
   const aiMessagesRef = useRef<HTMLDivElement | null>(null);
   const activeSettingsSection = settingsSection || 'home';
+  const aiChatScrollToken = getAIChatScrollToken(aiChatMessages, aiSending ? 'sending' : 'idle');
+  useAIChatAutoScroll(aiMessagesRef, activeTab === 'ai', aiChatScrollToken);
 
   useEffect(() => {
     try { localStorage.setItem('ars-note.right.ai.quickPromptsOpen', aiQuickPromptsOpen ? 'true' : 'false'); } catch { /* ignore */ }
@@ -959,15 +968,6 @@ const RightPanel: React.FC<RightPanelProps> = ({
   useEffect(() => {
     try { localStorage.setItem('ars-note.settings.showAdvanced', settingsShowAdvanced ? 'true' : 'false'); } catch { /* ignore */ }
   }, [settingsShowAdvanced]);
-
-  useEffect(() => {
-    if (activeTab !== 'ai') return;
-    const target = aiMessagesRef.current;
-    if (!target) return;
-    window.requestAnimationFrame(() => {
-      target.scrollTop = target.scrollHeight;
-    });
-  }, [activeTab, aiChatMessages.length, aiSending]);
 
   /* Sync config local edit state */
   const [syncEnabled, setSyncEnabled] = useState(false);
@@ -3597,7 +3597,15 @@ const RightPanel: React.FC<RightPanelProps> = ({
                       {language === 'zh-CN' ? `${t.line}${result.line}行` : `${t.line} ${result.line}`}
                     </div>
                   )}
-                  {result.snippet && <div className="search-result-snippet" dangerouslySetInnerHTML={{ __html: result.snippet.replace(new RegExp('(' + searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi'), '<mark style="background:var(--accent);color:#000;border-radius:2px;padding:0 2px">$1</mark>') }} />}
+                  {result.snippet && (
+                    <div className="search-result-snippet">
+                      {splitSearchHighlight(result.snippet, searchQuery).map((part, partIndex) => (
+                        part.highlighted
+                          ? <mark className="search-result-highlight" key={partIndex}>{part.text}</mark>
+                          : <React.Fragment key={partIndex}>{part.text}</React.Fragment>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               {searchQuery && searchResults.length === 0 && <div className="search-no-results">{t.noResults}</div>}
@@ -7516,11 +7524,6 @@ const RightPanel: React.FC<RightPanelProps> = ({
           const lastMsg = aiChatMessages.length > 0 ? aiChatMessages[aiChatMessages.length - 1] : null;
           const hasAssistantResponse = lastMsg && lastMsg.role === 'assistant';
 
-          /* ── Detect error messages ── */
-          const isErrorMessage = (msg: AIChatMessage): boolean => {
-            return msg.role === 'assistant' && (msg.content.startsWith('Error') || msg.content.startsWith('error') || msg.content.toLowerCase().includes('failed to'));
-          };
-
           return (
           <div className={'ai-panel' + (aiToolsOpen ? ' ai-tools-open' : '')}>
             {/* ── Provider Status Bar ── */}
@@ -7912,62 +7915,13 @@ const RightPanel: React.FC<RightPanelProps> = ({
 
             {/* ── Chat Messages ── */}
             <div className="ai-chat-messages" ref={aiMessagesRef}>
-              {aiChatMessages.length === 0 ? (
-                <div className="ai-chat-empty">
-                  <div className="ai-chat-empty-icon">{'['}</div>
-                  <div className="ai-chat-empty-text">{t.aiNoResponse}</div>
-                  <div className="ai-chat-empty-hint">{t.aiChatEmptyHint || 'Type a question below or use a quick prompt to get started.'}</div>
-                </div>
-              ) : (
-                aiChatMessages.map((msg: AIChatMessage, idx: number) => (
-                  <div key={idx} className={"ai-message ai-message-" + msg.role + (isErrorMessage(msg) ? " ai-message-error" : "")}>
-                    <div className="ai-message-header">
-                      <span className={"ai-message-role " + msg.role}>{msg.role === 'user' ? 'You' : 'AI'}</span>
-                      <span className="ai-message-meta">{msg.createdAt.replace('T', ' ').substring(0, 19)}</span>
-                    </div>
-                    <div className="ai-message-content">{msg.content}</div>
-                    {msg.toolCalls && msg.toolCalls.length > 0 && (
-                      <div className="ai-tool-calls">
-                        <div className="ai-tool-calls-header">
-                          <span>{'Tools (' + msg.toolCalls.length + ')'}</span>
-                        </div>
-                        <div className="ai-tool-calls-body">
-                          {msg.toolCalls.map((tc, ti) => (
-                            <div key={ti} className={"ai-tool-card ai-tool-card-" + tc.status}>
-                              <div className="ai-tool-card-header">
-                                <span className="ai-tool-status-dot" />
-                                <span className="ai-tool-name">{tc.name}</span>
-                                <span className="ai-tool-status-label">{tc.status === 'done' ? '完成' : '...'}</span>
-                              </div>
-                              {tc.artifacts && tc.artifacts.length > 0 && (
-                                <div className="ai-artifact-list">
-                                  {tc.artifacts.map((artifact, ai) => (
-                                    <div key={ai} className={'ai-artifact-card ai-artifact-' + artifact.type}>
-                                      <div className="ai-artifact-top">
-                                        <span className="ai-artifact-kind">{artifact.type}</span>
-                                        <span className={'ai-artifact-quality ai-artifact-quality-' + artifact.qualityStatus}>
-                                          {artifact.qualityStatus === 'auto_fixed' ? '已自动修复' : artifact.qualityStatus === 'checked' ? '已检查' : '已记录'}
-                                        </span>
-                                      </div>
-                                      <div className="ai-artifact-path">{artifact.path}</div>
-                                      {artifact.notes && artifact.notes.length > 0 && (
-                                        <div className="ai-artifact-notes">
-                                          {artifact.notes.slice(0, 2).map((note, ni) => <div key={ni}>{note}</div>)}
-                                        </div>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                              {tc.result && <div className="ai-tool-card-result">{tc.result.length > 180 ? tc.result.slice(0, 180) + '...' : tc.result}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
+              <AIChatMessageList
+                messages={aiChatMessages}
+                variant="compact"
+                emptyTitle={t.aiNoResponse}
+                emptyHint={t.aiChatEmptyHint || 'Type a question below or use a quick prompt to get started.'}
+                locale={language === 'zh-CN' ? 'zh' : 'en'}
+              />
             </div>
 
             {/* ── Chat Input ── */}
@@ -7990,14 +7944,25 @@ const RightPanel: React.FC<RightPanelProps> = ({
                 disabled={!isConfigured}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && isConfigured) { e.preventDefault(); onAISendChat(aiInput); } }}
               />
-              <button className="ai-send-btn" disabled={aiSending || !aiInput.trim() || !isConfigured} onClick={() => onAISendChat(aiInput)}>
-                {aiSending ? t.aiSending : t.aiSend}
-              </button>
+              {aiCanCancel ? (
+                <button className="ai-send-btn ai-stop-btn" onClick={onAICancelChat}>
+                  {t.aiStopGenerating}
+                </button>
+              ) : (
+                <button className="ai-send-btn" disabled={aiSending || !aiInput.trim() || !isConfigured} onClick={() => onAISendChat(aiInput)}>
+                  {aiSending ? t.aiSending : t.aiSend}
+                </button>
+              )}
             </div>
 
             {/* ── Copy Response ── */}
             {hasAssistantResponse && (
               <div className="ai-response-actions">
+                {aiCanRetry && (
+                  <button className="ai-action-btn" disabled={aiSending} onClick={onAIRetryLast}>
+                    {t.aiRetryLast}
+                  </button>
+                )}
                 {onAIImportTasksToSchedule && (
                   <button className="ai-action-btn" disabled={aiSending} onClick={onAIImportTasksToSchedule}>
                     导入团队任务
@@ -8417,6 +8382,7 @@ const RightPanel: React.FC<RightPanelProps> = ({
           /* ── Doc type labels for create buttons ── */
           const docTypeLabels: Record<GameDocType, string> = {
             gdd: t.createGDD,
+            coreLoop: t.createCoreLoop,
             worldbuilding: t.createWorldbuilding,
             story: t.createStory,
             dialogue: t.createDialogue,
@@ -8798,6 +8764,7 @@ const RightPanel: React.FC<RightPanelProps> = ({
                   <span className="game-create-group-label">{t.designDocs || 'Design'}</span>
                   <div className="game-create-group-btns">
                     <button className="game-create-btn" disabled={gameDocCreating} onClick={() => onCreateGameDoc('gdd')}>{t.createGDD}</button>
+                    <button className="game-create-btn" disabled={gameDocCreating} onClick={() => onCreateGameDoc('coreLoop')}>{t.createCoreLoop}</button>
                     <button className="game-create-btn" disabled={gameDocCreating} onClick={() => onCreateGameDoc('worldbuilding')}>{t.createWorldbuilding}</button>
                     <button className="game-create-btn" disabled={gameDocCreating} onClick={() => onCreateGameDoc('character')}>{t.createCharacter}</button>
                     <button className="game-create-btn" disabled={gameDocCreating} onClick={() => onCreateGameDoc('item')}>{t.createItem}</button>

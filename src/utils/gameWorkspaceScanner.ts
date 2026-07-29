@@ -14,6 +14,19 @@ interface DocRule {
 
 const DOC_RULES: DocRule[] = [
   {
+    type: 'coreLoop',
+    pathPrefixes: [],
+    titlePatterns: [
+      /GameplayLoop/i,
+      /CoreGameplayLoop/i,
+      /Core Gameplay Loop/i,
+      /# Core Loop\b/i,
+      /# 核心玩法循环/,
+      /# 核心循环/,
+      /# 游戏循环/,
+    ],
+  },
+  {
     type: 'gdd',
     pathPrefixes: ['01_GDD/', '01_gdd/'],
     titlePatterns: [
@@ -248,6 +261,7 @@ export function scanGameWorkspace(vaultIndex: VaultIndex): GameWorkspaceResult {
   const entries: GameWorkspaceEntry[] = [];
   const grouped: Record<GameDocType, GameWorkspaceEntry[]> = {
     gdd: [],
+    coreLoop: [],
     worldbuilding: [],
     story: [],
     dialogue: [],
@@ -319,6 +333,7 @@ export function scanGameWorkspace(vaultIndex: VaultIndex): GameWorkspaceResult {
 
   const summary: GameWorkspaceSummary = {
     gddCount: grouped.gdd.length,
+    coreLoopCount: grouped.coreLoop.length,
     worldbuildingCount: grouped.worldbuilding.length,
     storyCount: grouped.story.length,
     dialogueCount: grouped.dialogue.length,
@@ -340,7 +355,7 @@ export function scanGameWorkspace(vaultIndex: VaultIndex): GameWorkspaceResult {
 
 /* ── Dashboard builder (v0.9.3) ── */
 
-const ALL_DOC_TYPES: GameDocType[] = ['gdd', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
+const ALL_DOC_TYPES: GameDocType[] = ['gdd', 'coreLoop', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
 
 export function buildGameWorkspaceDashboard(
   entries: GameWorkspaceEntry[],
@@ -452,6 +467,7 @@ const STATUS_COLUMNS: { id: string; label: string; statuses: string[] }[] = [
 
 const TYPE_COLUMNS: { id: GameDocType; label: string }[] = [
   { id: 'gdd', label: 'GDD' },
+  { id: 'coreLoop', label: 'Core Loop' },
   { id: 'worldbuilding', label: 'Worldbuilding' },
   { id: 'story', label: 'Story' },
   { id: 'dialogue', label: 'Dialogue' },

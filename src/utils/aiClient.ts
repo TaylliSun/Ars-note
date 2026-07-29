@@ -19,7 +19,9 @@ const BASE_SYSTEM_PROMPT = `You are an AI assistant for Ars-note, a local-first 
 
 You have direct access to the user's vault file system via tools. You CAN:
 - read_file(path): Read any file in the vault. path is relative to vault root.
+- search_vault_text(query, path_scope, paths, case_sensitive, max_results): Search all Markdown documents for an exact old term and return every matching path, line, context preview, and fenced-code status.
 - write_file(path, content): Create or overwrite files (creates folders automatically). path is relative to vault root.
+- refactor_vault_term(from, to, paths, case_sensitive, replace_in_code_blocks): Apply a reviewed terminology/canon migration to an explicit Markdown path list, preserve fenced code blocks by default, save rollback history, and verify residual old-term matches.
 - append_file(path, content): Append content to existing files
 - delete_file(path): Safely delete one explicitly requested local file in the vault immediately when the user asks. It creates a local recovery copy and publishes a normal Live Sync delete record so connected computers receive the deletion automatically. Never use it unless the user clearly asks to delete/remove that specific file.
 - list_files(path): List files and folders in a directory. path is relative to vault root, or empty for root.
@@ -32,6 +34,18 @@ You have direct access to the user's vault file system via tools. You CAN:
 - sync_team_task_docs(fallback_member): Synchronize linked task Markdown documents back into the team schedule, including task frontmatter and work-log sections.
 - upsert_team_tasks(tasks, source_label): Add or update concrete production tasks in the team schedule without duplicating existing tasks.
 - generate_team_production_docs(include_handoff, include_ai_memory_index, include_link_health, include_dependency_map, include_blocker_handoff, include_review_queue, include_workpack, include_daily_standup, include_timesheet, include_roadmap, include_decision_log, include_change_impact, include_narrative_director, include_sprint_plan, include_member_pages, include_task_docs, include_obsidian_command_center, include_dashboard): Refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/obsidian-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/reports/daily-standup-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, .ars-team/team-dashboard.md, and missing 07_Unity_Tasks/*.md task work docs after syncing or changing team tasks.
+
+═══════════════════════════════════════════════════════════
+MANDATORY - Cross-document terminology and canon migrations
+═══════════════════════════════════════════════════════════
+When the user changes a canonical concept or term, for example "装饰 is now 灵纹", do not update only the current or most relevant note.
+1. Call search_vault_text with the old term and no path scope so the entire Markdown vault is audited.
+2. Classify every hit using its path, line, and context. Include current GDD, worldbuilding, characters, maps, items, quests, dialogue, performance, UI, task, and technical handoff documents when the hit expresses current design canon.
+3. Preserve historical quotations, changelogs, source-code identifiers, file names, and fenced code blocks unless the user explicitly asks to migrate them too.
+4. Call refactor_vault_term once with the exact reviewed Markdown path list. Never pass guessed or unrelated paths.
+5. Call search_vault_text again with the old term. Do not claim the migration is complete while unexplained current-canon matches remain.
+6. Report the old and new terms, changed files, replacement count, intentionally preserved matches, residual paths, and any documents that need semantic rewriting instead of literal replacement.
+If the old term changed meaning rather than merely changing name, read each affected document and use write_file for semantic rewrites after the vault-wide audit.
 
 ═══════════════════════════════════════════════════════════
 MANDATORY - File Naming Conventions
@@ -419,7 +433,7 @@ function buildContextSection(input: AIRequestInput): string {
         const s = input.gameWorkspaceSummary;
         sections.push('Game Workspace Summary:');
         sections.push(`- Total Game Docs: ${s.totalGameDocs}`);
-        sections.push(`- Design: GDD ${s.gddCount}, Worldbuilding ${s.worldbuildingCount}, Characters ${s.characterCount}, Items ${s.itemCount}`);
+        sections.push(`- Design: GDD ${s.gddCount}, Core loop ${s.coreLoopCount || 0}, Worldbuilding ${s.worldbuildingCount}, Characters ${s.characterCount}, Items ${s.itemCount}`);
         sections.push(`- Narrative: Story ${s.storyCount}, Dialogue ${s.dialogueCount}, Performance ${s.performanceCount}`);
         sections.push(`- Production: Quests ${s.questCount}, Task Tables ${s.taskTableCount}, Unity Tasks ${s.unityTaskCount}, Devlogs ${s.devlogCount}`);
         sections.push(`- Draft: ${s.draftCount}, Done: ${s.doneCount}, High Priority: ${s.highPriorityCount}`);
@@ -833,7 +847,7 @@ export function buildAIChatMessages(
   return buildAIChatRequest(userPrompt, contextInput, previousMessages).messages;
 }
 
-export const AI_CONTEXT_TOKEN_LIMIT = 1_000_000;
+export const AI_CONTEXT_TOKEN_LIMIT = 120_000;
 
 export interface AIChatRequestBuildResult {
   messages: Array<{ role: string; content: string }>;
@@ -875,7 +889,7 @@ function truncateMiddleForAIContext(text: string, maxChars: number): string {
   const tail = Math.floor(maxChars * 0.34);
   return [
     value.slice(0, head).trimEnd(),
-    `\n\n...(auto-compressed ${value.length - head - tail} characters to fit the 1M context budget)...\n\n`,
+    `\n\n...(auto-compressed ${value.length - head - tail} characters to fit the active context budget)...\n\n`,
     value.slice(value.length - tail).trimStart(),
   ].join('');
 }
@@ -911,7 +925,7 @@ function fitAIContextMessagesToBudget(
         role: 'assistant',
         content: [
           '[Auto-compressed conversation memory]',
-          'Older conversation turns were compacted locally to fit the 1M context window. Recent turns remain expanded below.',
+          'Older conversation turns were compacted locally to fit the active context window. Recent turns remain expanded below.',
           summary,
         ].join('\n\n'),
       },
@@ -1020,6 +1034,12 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
     contextMode: 'currentNote',
   },
   {
+    id: 'design-core-gameplay-loop',
+    labelKey: 'designCoreGameplayLoop',
+    prompt: 'Design or repair the project core gameplay loop as a senior system designer, with economy and UX cross-review. IMPORTANT STEPS: 1) Inspect 01_GDD/ first, then read only the most relevant 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ documents; distinguish confirmed facts, existing decisions, assumptions, and open questions. 2) Reuse and update an equivalent existing core-loop document when one exists; otherwise use write_file("01_GDD/GameplayLoop.md", content). 3) Define the player promise, target emotion/play context, core verbs, meaningful decisions, and non-goals. 4) Model connected moment-to-moment, encounter/task, session, meta/progression, and long-term loops. For every step specify player intent, action/input, rule/state change, feedback, reward/cost, decision, failure/recovery, and re-entry condition. 5) Map resource sources, transformations, storage/caps, sinks, gates, unlocks, reset points, interruption/resume, anti-exploit rules, and early/mid/late variants. 6) Add UX/VFX/SFX feedback, accessibility, content-production burden, system dependencies, a traceability matrix, smallest playable prototype, observation plan, telemetry events, acceptance criteria, and Passed/Needs review/Blocked gates. Do not invent numeric targets without project evidence. 7) Do not create Canvas, Excalidraw, workspace summaries, companion .visual.md files, or team schedule tasks. 8) Verify the exact Markdown path with list_files("01_GDD/") and respond in Chinese with the path, loop thesis, unresolved assumptions, and prototype test. A feature list or Action -> Reward -> Action slogan is not sufficient.',
+    contextMode: 'gameWorkspace',
+  },
+  {
     id: 'generate-character',
     labelKey: 'generateCharacterDraft',
     prompt: 'Generate a character profile draft. IMPORTANT STEPS: 1) First use list_files("03_Characters/") to see existing characters. 2) Use write_file("03_Characters/CharacterName.md", content) to create the file. 3) Then use list_files("03_Characters/") to verify the exact file name. 4) Use the EXACT file name (without .md) in all [[wiki-links]]. Link to related quests, items, and other characters using [[ExactFileName]]. Include: name, role, backstory, personality, abilities. Add tags like #character. Use Markdown.',
@@ -1034,7 +1054,7 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
   {
     id: 'check-missing-docs',
     labelKey: 'checkMissingDocs',
-    prompt: 'Analyze the game workspace. IMPORTANT: 1) Use list_files on each folder (01_GDD/, 02_Worldbuilding/, 03_Characters/, 05_Items/, 06_Quests/, 07_Unity_Tasks/, 99_Devlog/) to check what exists. 2) Identify missing core documents, including a worldbuilding overview/world bible. 3) Create missing documents with proper templates using write_file. 4) After EACH file creation, use list_files to verify the exact file name. 5) Use the EXACT file name (without .md) in all [[wiki-links]] between documents. 6) List what was created with the verified file names.',
+    prompt: 'Analyze the game workspace. IMPORTANT: 1) Use list_files on each folder (01_GDD/, 02_Worldbuilding/, 03_Characters/, 05_Items/, 06_Quests/, 07_Unity_Tasks/, 99_Devlog/) to check what exists. 2) Identify missing core documents, including a production-ready core gameplay loop and a worldbuilding overview/world bible. Treat an existing equivalent document as present instead of creating a duplicate. 3) Create missing documents with proper templates using write_file. 4) After EACH file creation, use list_files to verify the exact file name. 5) Use the EXACT file name (without .md) in all [[wiki-links]] between documents. 6) List what was created with the verified file names. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files.',
     contextMode: 'gameWorkspace',
   },
   {
@@ -1170,6 +1190,7 @@ QUICK_PROMPTS.push(
 
 const PROFESSIONAL_QUICK_PROMPT_OVERRIDES: Record<string, string> = {
   'write-game-design-spec': 'Write or update a production-ready game design spec. First inspect the current note plus relevant 01_GDD/, 02_Worldbuilding/, 03_Characters/, 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ docs. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files unless explicitly requested. Produce a Markdown spec with: source references inspected, one-sentence design intent, player fantasy, goals/non-goals, core loop, mechanic rules, progression/economy, balance knobs, data/config schema, UI/feedback/VFX/SFX, art/content pipeline, technical handoff, edge cases, QA/telemetry, acceptance criteria, risks, open questions, and next tasks. Save it as 01_GDD/GameDesignSpec.md unless a more specific existing design doc should be updated; verify the exact file name. Respond in Chinese with the path and the most important design decisions.',
+  'design-core-gameplay-loop': 'Design or repair the project core gameplay loop as a senior system designer, with economy and UX cross-review. IMPORTANT STEPS: 1) Inspect 01_GDD/ first, then read only the most relevant 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ documents; distinguish confirmed facts, existing decisions, assumptions, and open questions. 2) Reuse and update an equivalent existing core-loop document when one exists; otherwise use write_file("01_GDD/GameplayLoop.md", content). 3) Define the player promise, target emotion/play context, core verbs, meaningful decisions, and non-goals. 4) Model connected moment-to-moment, encounter/task, session, meta/progression, and long-term loops. For every step specify player intent, action/input, rule/state change, feedback, reward/cost, decision, failure/recovery, and re-entry condition. 5) Map resource sources, transformations, storage/caps, sinks, gates, unlocks, reset points, interruption/resume, anti-exploit rules, and early/mid/late variants. 6) Add UX/VFX/SFX feedback, accessibility, content-production burden, system dependencies, a traceability matrix, smallest playable prototype, observation plan, telemetry events, acceptance criteria, and Passed/Needs review/Blocked gates. Do not invent numeric targets without project evidence. 7) Do not create Canvas, Excalidraw, workspace summaries, companion .visual.md files, or team schedule tasks. 8) Verify the exact Markdown path with list_files("01_GDD/") and respond in Chinese with the path, loop thesis, unresolved assumptions, and prototype test. A feature list or Action -> Reward -> Action slogan is not sufficient.',
   'design-system-breakdown': 'Turn the current idea, note, or referenced feature into a system-design breakdown for implementation. First inspect the current note and relevant GDD/Unity task files. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files unless explicitly requested. Write Markdown covering: feature purpose, player-facing loop, state machine, triggers, rules, data fields, formulas/default values, progression/economy impact, UI states, feedback, dependencies, failure cases, QA cases, telemetry, Unity implementation tasks, and acceptance criteria. Save it as 01_GDD/SystemDesign.md or update the most appropriate existing system design doc, then verify the exact file name. Respond in Chinese with the path and task handoff summary.',
   'create-wireframe': 'Create a professional game UI wireframe prototype. First inspect existing wireframes with list_files("wireframes/") and read any relevant UI/GDD files. Use create_wireframe to create an .excalidraw file with 1-3 focused screens. Use a realistic frame size (desktop 1366x768 or mobile 390x844), clear navigation, main content hierarchy, primary/secondary actions, empty/error/selected states, and consistent spacing (24px page padding, 16px panel padding, 8-12px gaps). Do not cram requirements text into the prototype; every label must fit inside its box, so keep labels short and commercial. After creation, summarize the screen purpose, interaction flow, and exact file path in Chinese.',
   'create-canvas': 'Create a professional visual planning canvas. First inspect the vault with list_files/read_file for relevant docs. Use create_canvas to build a structured .canvas with a title card, legend/status card, 3-6 groups or lanes, and 8-18 substantial cards connected by clear edges. For flowcharts, include start/end, decisions, dependencies, and acceptance checkpoints. Use aligned coordinates, 60-100px spacing, and consistent card sizes. Do not rely on card scrolling; keep each card to 4-6 bullets and split dense sections into multiple connected cards. Use file cards only for real existing files. Respond in Chinese with the exact path and a short explanation of the board structure.',

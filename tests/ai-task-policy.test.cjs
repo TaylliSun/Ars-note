@@ -76,3 +76,41 @@ test('task contract repeats the Ars-note runtime identity after retrieved contex
   assert.match(policy.systemHint, /You are Ars-note AI Agent/);
   assert.match(policy.systemHint, /You are not Obsidian/);
 });
+
+test('cross-document terminology migration requires a vault search before batch refactoring', () => {
+  const policy = buildAITaskPolicy('原来是装饰，现在统一改成灵纹，部分文档仍然有装饰残留', 'member');
+  assert.equal(policy.primary, 'terminology-migration');
+  assert.equal(evaluateAIToolCall(policy, 'search_vault_text', { query: '装饰' }).allowed, true);
+
+  const earlyRefactor = evaluateAIToolCall(policy, 'refactor_vault_term', {
+    from: '装饰',
+    to: '灵纹',
+    paths: '["01_GDD/GDD.md"]',
+  });
+  assert.equal(earlyRefactor.allowed, false);
+  assert.match(earlyRefactor.reason, /Search the entire vault/i);
+
+  const reviewedRefactor = evaluateAIToolCall(
+    policy,
+    'refactor_vault_term',
+    {
+      from: '装饰',
+      to: '灵纹',
+      paths: '["01_GDD/GDD.md","04_Maps/LotusPondIsland.md"]',
+    },
+    [{ name: 'search_vault_text', args: { query: '装饰' }, result: '{"matchCount":2}' }],
+  );
+  assert.equal(reviewedRefactor.allowed, true);
+  assert.match(policy.systemHint, /search_vault_text\(old term\)/);
+});
+
+test('vault terminology refactor is blocked for unrelated requests', () => {
+  const policy = buildAITaskPolicy('莲池岛的核心体验是什么？', 'producer');
+  const decision = evaluateAIToolCall(
+    policy,
+    'refactor_vault_term',
+    { from: '装饰', to: '灵纹', paths: '["01_GDD/GDD.md"]' },
+    [{ name: 'search_vault_text', args: { query: '装饰' } }],
+  );
+  assert.equal(decision.allowed, false);
+});

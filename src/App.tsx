@@ -3,7 +3,6 @@ import type { FileNode, VaultConfig, VaultOpenResult, SearchResult, VaultIndex, 
 import { buildGraphData, computeGraphSummary } from './utils/graphBuilder';
 import { resolveWikiLink } from './utils/markdownLinks';
 import { scanGameWorkspace } from './utils/gameWorkspaceScanner';
-import { createGameWorkspaceDoc, createNarrativeProductionKit, resolveFileName } from './utils/gameWorkspaceHelper';
 import { buildGameWorkspaceReportMarkdown } from './utils/gameWorkspaceReport';
 import { buildArshisGameContext, buildArshisContextMarkdown, buildArshisContextJson, getArshisContextBaseName } from './utils/arshisContextBuilder';
 import { AI_CONTEXT_TOKEN_LIMIT, buildAIChatRequest, QUICK_PROMPTS, estimateAIContextUsageFromMessages } from './utils/aiClient';
@@ -13,6 +12,8 @@ import { buildAITeamScheduleContext } from './utils/teamScheduleContext';
 import { mapSyncProviderToCloudId, validateProviderConfig as validateProviderConfigFn } from './utils/cloudBackupProvider';
 import { formatBytes } from './utils/vaultManifest';
 import { buildExportDocument as buildMarkdownExportDocument, renderMarkdown as renderMarkdownHtml } from './utils/markdownRenderer';
+import { getAIChatScrollToken } from './utils/aiChatPresentation';
+import { createCoalescedAsyncRunner } from './utils/coalescedAsyncRunner';
 import {
   WORKSPACE_SESSION_VERSION,
   migrateWorkspaceSession,
@@ -26,6 +27,7 @@ import ConfirmDialog from './components/ConfirmDialog';
 import NewItemDialog from './components/NewItemDialog';
 import PromptDialog from './components/PromptDialog';
 import ErrorBoundary from './components/ErrorBoundary';
+import AIChatMessageList, { useAIChatAutoScroll } from './components/AIChatMessageList';
 import type { QuickCommand, QuickFileMeta } from './components/QuickSwitcher';
 import { BotIcon, GraphIcon, FileIcon, ChevronRightIcon, SyncIcon, CloseIcon, MenuIcon, LocateIcon, CopyIcon, ClockIcon } from './components/icons/ArsIcons';
 import { APP_VERSION, APP_VERSION_LABEL } from './appVersion';
@@ -228,6 +230,17 @@ function normalizeDisplayAIChatMessages(messages: any[]): AIChatMessage[] {
     }
   }
   return chatMsgs;
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedValue(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debouncedValue;
 }
 
 function flattenAIContextFiles(nodes: FileNode[], prefix = ''): string[] {
@@ -434,6 +447,11 @@ const App: React.FC = () => {
   const [vaultIndex, setVaultIndex] = useState<VaultIndex>(EMPTY_INDEX);
   const [indexRefreshMsg, setIndexRefreshMsg] = useState('');
   const [teamWorkspaceOpening, setTeamWorkspaceOpening] = useState(false);
+  const activeVaultPathRef = useRef(vaultPath);
+  const indexRefreshRunnerRef = useRef<ReturnType<typeof createCoalescedAsyncRunner> | null>(null);
+  const scheduleIndexRefreshRef = useRef<() => void>(() => {});
+  const indexRefreshMessageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  activeVaultPathRef.current = vaultPath;
 
   const dismissNotice = useCallback((id: string) => {
     const timer = noticeTimersRef.current.get(id);
@@ -502,6 +520,7 @@ const App: React.FC = () => {
   });
   const [aiChatMessages, setAiChatMessages] = useState<AIChatMessage[]>([]);
   const [aiInput, setAiInput] = useState('');
+  const debouncedAIInput = useDebouncedValue(aiInput, 240);
   const [aiContextMode, setAiContextMode] = useState<AIContextMode>('gameWorkspace');
   const [aiControlMode, setAiControlMode] = useState<AIControlMode>(() => {
     try {
@@ -515,6 +534,8 @@ const App: React.FC = () => {
   const [aiContextUsage, setAiContextUsage] = useState<AIContextUsage>(() => estimateAIContextUsageFromMessages([], '', AI_CONTEXT_TOKEN_LIMIT));
   const [aiTeamScheduleContextPreview, setAiTeamScheduleContextPreview] = useState<AITeamScheduleContext | undefined>(undefined);
   const [aiSending, setAiSending] = useState(false);
+  const [aiRetryPrompt, setAiRetryPrompt] = useState('');
+  const activeAIRequestIdRef = useRef<string | null>(null);
   const [aiRemoteSending, setAiRemoteSending] = useState(false);
   const [aiCopiedResponse, setAiCopiedResponse] = useState(false);
   const [aiHistoryList, setAiHistoryList] = useState<Array<{ file: string; date?: string; savedAt?: string; messageCount?: number }>>([]);
@@ -527,6 +548,15 @@ const App: React.FC = () => {
   const [aiFormApiKey, setAiFormApiKey] = useState('');
   const [aiLiveToolCalls, setAiLiveToolCalls] = useState<import('./types').AIToolCallRecord[]>([]);
   const centerAiMessagesRef = useRef<HTMLDivElement | null>(null);
+  const centerAIChatScrollToken = getAIChatScrollToken(
+    aiChatMessages,
+    `${aiLiveToolCalls.length}:${aiSending ? 'sending' : aiRemoteSending ? 'remote' : 'idle'}`,
+  );
+  useAIChatAutoScroll(
+    centerAiMessagesRef,
+    showCenterAI && aiPanelTab === 'chat',
+    centerAIChatScrollToken,
+  );
 
   useEffect(() => {
     try { localStorage.setItem('ars-note.ai.controlMode', aiControlMode); } catch { /* ignore */ }
@@ -549,15 +579,6 @@ const App: React.FC = () => {
 
     return () => { cancelled = true; };
   }, [aiContextMode, vaultPath]);
-
-  useEffect(() => {
-    if (!showCenterAI || aiPanelTab !== 'chat') return;
-    const target = centerAiMessagesRef.current;
-    if (!target) return;
-    window.requestAnimationFrame(() => {
-      target.scrollTop = target.scrollHeight;
-    });
-  }, [showCenterAI, aiPanelTab, aiChatMessages.length, aiLiveToolCalls.length, aiSending, aiRemoteSending]);
 
   const [showQuickSwitch, setShowQuickSwitch] = useState(false);
   const [quickSwitchMode, setQuickSwitchMode] = useState<'files' | 'commands'>('files');
@@ -821,6 +842,8 @@ const App: React.FC = () => {
   const aiLiveSessionVersionRef = useRef(0);
   const aiLiveSessionPublishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressAiLiveSessionPublishRef = useRef(false);
+  const aiConversationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressAiConversationSaveRef = useRef(false);
 
   const applyAiLiveSessionPayload = useCallback((payload: AILiveSessionPayload | null): boolean => {
     if (!payload || payload.kind !== 'ars-note.ai-live-session' || !Array.isArray(payload.messages)) return false;
@@ -830,6 +853,7 @@ const App: React.FC = () => {
 
     aiLiveSessionVersionRef.current = incomingVersion;
     suppressAiLiveSessionPublishRef.current = true;
+    suppressAiConversationSaveRef.current = true;
     setAiChatMessages(normalizeDisplayAIChatMessages(payload.messages));
     setAiRemoteSending(!!payload.sending);
     setAiLiveToolCalls(payload.sending ? (payload.liveToolCalls || []) : []);
@@ -853,10 +877,25 @@ const App: React.FC = () => {
 
   /* Auto-save AI chat messages when they change */
   useEffect(() => {
-    if (!vaultPath || aiChatMessages.length === 0) return;
-    if (api.aiSaveConversation) {
-      api.aiSaveConversation(vaultPath, aiChatMessages).catch(() => {});
+    if (suppressAiConversationSaveRef.current) {
+      suppressAiConversationSaveRef.current = false;
+      return;
     }
+
+    if (!vaultPath || aiChatMessages.length === 0) return;
+    if (!api.aiSaveConversation) return;
+    if (aiConversationSaveTimerRef.current) clearTimeout(aiConversationSaveTimerRef.current);
+    aiConversationSaveTimerRef.current = setTimeout(() => {
+      aiConversationSaveTimerRef.current = null;
+      api.aiSaveConversation(vaultPath, aiChatMessages).catch(() => {});
+    }, 500);
+
+    return () => {
+      if (aiConversationSaveTimerRef.current) {
+        clearTimeout(aiConversationSaveTimerRef.current);
+        aiConversationSaveTimerRef.current = null;
+      }
+    };
   }, [aiChatMessages, vaultPath]);
 
   /* Live Sync: mirror the currently open AI chat session across devices. */
@@ -938,6 +977,9 @@ const App: React.FC = () => {
       }
       /* Refresh file tree */
       refreshTree();
+      if (typeof data.relativePath !== 'string' || !data.relativePath.startsWith('.')) {
+        scheduleIndexRefreshRef.current();
+      }
       if (typeof data.relativePath === 'string' && data.relativePath.startsWith('.ai-memory/')) {
         api.aiListConversations?.(vaultPath).then((list: any[]) => {
           setAiHistoryList(list || []);
@@ -1165,16 +1207,56 @@ const App: React.FC = () => {
 
   /* ── Vault index scanning ── */
   const refreshIndex = useCallback(async () => {
-    if (!vaultPath) return;
+    const runner = indexRefreshRunnerRef.current;
+    if (!runner || !activeVaultPathRef.current) return;
     try {
-      const idx = await api.scanVaultIndex(vaultPath);
-      setVaultIndex(idx);
+      await runner.runNow();
       setIndexRefreshMsg(t.indexRefreshed);
-      setTimeout(() => setIndexRefreshMsg(''), 2000);
-    } catch (err) { console.error('Failed to scan vault index:', err); }
-  }, [vaultPath, t]);
+      if (indexRefreshMessageTimerRef.current) clearTimeout(indexRefreshMessageTimerRef.current);
+      indexRefreshMessageTimerRef.current = setTimeout(() => {
+        indexRefreshMessageTimerRef.current = null;
+        setIndexRefreshMsg('');
+      }, 2000);
+    } catch (err) {
+      console.error('Failed to scan vault index:', err);
+    }
+  }, [t.indexRefreshed]);
 
-  useEffect(() => { if (vaultPath) refreshIndex(); }, [vaultPath, refreshIndex]);
+  const scheduleIndexRefresh = useCallback(() => {
+    indexRefreshRunnerRef.current?.schedule();
+  }, []);
+
+  useEffect(() => {
+    indexRefreshRunnerRef.current?.cancel();
+    if (!vaultPath) {
+      indexRefreshRunnerRef.current = null;
+      scheduleIndexRefreshRef.current = () => {};
+      setVaultIndex(EMPTY_INDEX);
+      return;
+    }
+
+    const indexedVaultPath = vaultPath;
+    const runner = createCoalescedAsyncRunner(async () => {
+      const index = await api.scanVaultIndex(indexedVaultPath);
+      if (activeVaultPathRef.current === indexedVaultPath) setVaultIndex(index);
+    }, 800, (error) => {
+      console.error('Failed to scan vault index:', error);
+    });
+    const scheduleCurrentIndex = () => runner.schedule();
+    indexRefreshRunnerRef.current = runner;
+    scheduleIndexRefreshRef.current = scheduleCurrentIndex;
+    void runner.runNow().catch((error) => console.error('Failed to scan vault index:', error));
+
+    return () => {
+      runner.cancel();
+      if (indexRefreshRunnerRef.current === runner) indexRefreshRunnerRef.current = null;
+      if (scheduleIndexRefreshRef.current === scheduleCurrentIndex) scheduleIndexRefreshRef.current = () => {};
+    };
+  }, [vaultPath]);
+
+  useEffect(() => () => {
+    if (indexRefreshMessageTimerRef.current) clearTimeout(indexRefreshMessageTimerRef.current);
+  }, []);
 
   /* ── Auto-save ── */
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1203,17 +1285,17 @@ const App: React.FC = () => {
   const doSave = useCallback(async () => {
     if (!currentFile || currentContent === savedContent) return;
     setSaveStatus('saving');
-    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); refreshIndex(); }
+    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
     catch (err) { console.error('Save failed:', err); setSaveStatus('error'); }
-  }, [currentFile, currentContent, savedContent, refreshIndex]);
+  }, [currentFile, currentContent, savedContent, scheduleIndexRefresh]);
 
   const saveNow = useCallback(async () => {
     if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
     if (!currentFile || currentContent === savedContent) return;
     setSaveStatus('saving');
-    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); refreshIndex(); }
+    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
     catch (err) { console.error('Save failed:', err); setSaveStatus('error'); }
-  }, [currentFile, currentContent, savedContent, refreshIndex]);
+  }, [currentFile, currentContent, savedContent, scheduleIndexRefresh]);
 
   useEffect(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -1643,19 +1725,11 @@ const App: React.FC = () => {
     if (api.aiLoadLatestConversation) {
       api.aiLoadLatestConversation(result.path).then((msgs: any[]) => {
         if (msgs && msgs.length > 0) {
-          // Convert raw messages (system/user/assistant/tool) to displayable AIChatMessage[]
-          const chatMsgs: AIChatMessage[] = [];
-          for (const m of msgs) {
-            if (m.role === 'user' || m.role === 'assistant') {
-              chatMsgs.push({
-                role: m.role,
-                content: m.content || '',
-                createdAt: new Date().toISOString(),
-                toolCalls: m.toolCalls || m.tool_calls || undefined,
-              });
-            }
+          const chatMsgs = normalizeDisplayAIChatMessages(msgs).filter((message) => message.role !== 'system');
+          if (chatMsgs.length > 0) {
+            suppressAiConversationSaveRef.current = true;
+            setAiChatMessages(chatMsgs);
           }
-          if (chatMsgs.length > 0) setAiChatMessages(chatMsgs);
         }
       }).catch(() => {});
     }
@@ -1935,6 +2009,7 @@ const App: React.FC = () => {
     if (!vaultPath || gameDocCreating) return;
     setGameDocCreating(true);
     try {
+      const { createGameWorkspaceDoc, resolveFileName } = await import('./utils/gameWorkspaceHelper');
       const info = createGameWorkspaceDoc(type, t, language);
 
       /* Ensure folder exists */
@@ -1973,6 +2048,7 @@ const App: React.FC = () => {
     if (!vaultPath || gameDocCreating) return;
     setGameDocCreating(true);
     try {
+      const { createNarrativeProductionKit } = await import('./utils/gameWorkspaceHelper');
       const kitFiles = createNarrativeProductionKit(vault?.name || 'Game Project');
       let openTargetPath = '';
       let createdCount = 0;
@@ -2664,10 +2740,14 @@ const App: React.FC = () => {
       setAiChatMessages((prev) => [...prev, { role: 'assistant' as const, content: t.aiNotConfigured, createdAt: new Date().toISOString() }]);
       return;
     }
-    const userMsg: AIChatMessage = { role: 'user', content: userPrompt.trim(), createdAt: new Date().toISOString() };
+    const normalizedPrompt = userPrompt.trim();
+    const userMsg: AIChatMessage = { role: 'user', content: normalizedPrompt, createdAt: new Date().toISOString() };
+    const requestId = globalThis.crypto?.randomUUID?.() || `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    activeAIRequestIdRef.current = requestId;
     setAiChatMessages((prev) => [...prev, userMsg]);
     setAiSending(true);
     setAiRemoteSending(false);
+    setAiRetryPrompt('');
     setAiInput('');
     setAiLiveToolCalls([]); // clear live progress
     try {
@@ -2699,7 +2779,8 @@ const App: React.FC = () => {
       }, aiChatMessages);
       setAiContextUsage(builtRequest.usage);
       const contextMessages = builtRequest.messages;
-      const response: AIResponse = await api.sendAIChat(vaultPath, contextMessages, { controlMode: aiControlMode });
+      const response: AIResponse = await api.sendAIChat(vaultPath, contextMessages, { controlMode: aiControlMode, requestId });
+      if (response.contextUsage) setAiContextUsage(response.contextUsage);
       if (response.ok) {
         const toolCalls = (response as any).toolCalls as import('./types').AIToolCallRecord[] | undefined;
         let assistantContent = response.content || '(AI completed file operations with no text response)';
@@ -2719,15 +2800,33 @@ const App: React.FC = () => {
           toolCalls: finalToolCalls,
         }]);
       } else {
-        setAiChatMessages((prev) => [...prev, { role: 'assistant' as const, content: 'Error: ' + (response.error || 'Unknown error'), createdAt: response.createdAt }]);
+        setAiRetryPrompt(normalizedPrompt);
+        const failureMessage = response.cancelled
+          ? t.aiRequestCancelled
+          : response.timedOut
+            ? t.aiRequestTimedOut
+            : 'Error: ' + (response.error || 'Unknown error');
+        setAiChatMessages((prev) => [...prev, { role: 'assistant' as const, content: failureMessage, createdAt: response.createdAt }]);
       }
     } catch (err: any) {
+      setAiRetryPrompt(normalizedPrompt);
       setAiChatMessages((prev) => [...prev, { role: 'assistant' as const, content: 'Error: ' + err.message, createdAt: new Date().toISOString() }]);
     } finally {
+      if (activeAIRequestIdRef.current === requestId) activeAIRequestIdRef.current = null;
       setAiSending(false);
       setAiLiveToolCalls([]);
     }
   }, [vaultPath, aiSending, aiRemoteSending, aiConfig, aiContextMode, aiControlMode, currentFile, currentContent, fileTree, gameWorkspace, vault, t, refreshTree, refreshIndex]);
+
+  const handleAICancelChat = useCallback(async () => {
+    const requestId = activeAIRequestIdRef.current;
+    if (!requestId) return;
+    try {
+      await api.cancelAIChat(requestId);
+    } catch (err: any) {
+      showNotice(err?.message || 'Unable to stop the AI request.', 'error');
+    }
+  }, []);
 
   /* ── Render helpers ── */
   const handleImportTasksToSchedule = useCallback(async (
@@ -2903,7 +3002,7 @@ const App: React.FC = () => {
   const isCanvasFile = currentFile ? currentFile.toLowerCase().endsWith('.canvas') : false;
   const aiBusy = aiSending || aiRemoteSending;
   const aiContextUsagePreview = useMemo(() => {
-    const prompt = aiInput.trim() || ' ';
+    const prompt = debouncedAIInput.trim() || ' ';
     try {
       const arshisContext = gameWorkspace.summary
         ? buildArshisContextMarkdown(buildArshisGameContext(gameWorkspace.summary, gameWorkspace.entries, vault?.name || ''))
@@ -2920,9 +3019,9 @@ const App: React.FC = () => {
         arshisContext,
       }, aiChatMessages).usage;
     } catch {
-      return estimateAIContextUsageFromMessages(aiChatMessages, aiInput, AI_CONTEXT_TOKEN_LIMIT);
+      return estimateAIContextUsageFromMessages(aiChatMessages, debouncedAIInput, AI_CONTEXT_TOKEN_LIMIT);
     }
-  }, [aiChatMessages, aiContextMode, aiInput, aiTeamScheduleContextPreview, currentContent, currentFile, gameWorkspace.entries, gameWorkspace.summary, vault?.name]);
+  }, [aiChatMessages, aiContextMode, aiTeamScheduleContextPreview, currentContent, currentFile, debouncedAIInput, gameWorkspace.entries, gameWorkspace.summary, vault?.name]);
   const visibleAIContextUsage = useMemo(() => {
     if (aiSending || aiRemoteSending) return aiContextUsage;
     return aiContextUsagePreview;
@@ -3909,70 +4008,14 @@ const App: React.FC = () => {
                               </div>
                             ) : (
                               <React.Fragment>
-                                {aiChatMessages.map((msg: AIChatMessage, idx: number) => (
-                                  <div key={idx} className={"ai-message ai-message-" + msg.role}>
-                                    <div className="ai-message-header">
-                                      <span className={"ai-message-role " + msg.role}>{msg.role === 'user' ? 'You' : 'AI'}</span>
-                                      <span className="ai-message-meta">{(msg.createdAt || '').replace('T', ' ').substring(0, 19)}</span>
-                                    </div>
-                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                      <div className="ai-tool-calls">
-                                        <div className="ai-tool-calls-header" onClick={(e) => {
-                                          const el = (e.currentTarget.parentElement as HTMLElement);
-                                          if (el) el.classList.toggle('collapsed');
-                                        }}>
-                                          <span className="ai-tool-calls-icon">{'▶'}</span>
-                                          <span>{'Tools (' + msg.toolCalls.length + ')'}</span>
-                                        </div>
-                                        <div className="ai-tool-calls-body">
-                                          {msg.toolCalls.map((tc, ti) => (
-                                            <div key={ti} className={"ai-tool-card ai-tool-card-" + tc.status}>
-                                              <div className="ai-tool-card-header">
-                                                <span className="ai-tool-status-dot" />
-                                                <span className="ai-tool-name">{tc.name}</span>
-                                                <span className="ai-tool-status-label">{tc.status === 'done' ? '✓' : '...'}</span>
-                                              </div>
-                                              <div className="ai-tool-card-args">
-                                                {tc.args && Object.entries(tc.args).map(([k, v]) => (
-                                                  <div key={k} className="ai-tool-arg"><span className="ai-tool-arg-key">{k}:</span> <span className="ai-tool-arg-val">{typeof v === 'string' && v.length > 120 ? v.slice(0, 120) + '...' : String(v)}</span></div>
-                                                ))}
-                                              </div>
-                                              {tc.artifacts && tc.artifacts.length > 0 && (
-                                                <div className="ai-artifact-list">
-                                                  {tc.artifacts.map((artifact, ai) => (
-                                                    <div key={ai} className={'ai-artifact-card ai-artifact-' + artifact.type}>
-                                                      <div className="ai-artifact-top">
-                                                        <span className="ai-artifact-kind">{artifact.type}</span>
-                                                        <span className={'ai-artifact-quality ai-artifact-quality-' + artifact.qualityStatus}>
-                                                          {artifact.qualityStatus === 'auto_fixed' ? '已自动修复' : artifact.qualityStatus === 'checked' ? '已检查' : '已记录'}
-                                                        </span>
-                                                      </div>
-                                                      <div className="ai-artifact-path">{artifact.path}</div>
-                                                      {artifact.notes && artifact.notes.length > 0 && (
-                                                        <div className="ai-artifact-notes">
-                                                          {artifact.notes.slice(0, 2).map((note, ni) => <div key={ni}>{note}</div>)}
-                                                        </div>
-                                                      )}
-                                                    </div>
-                                                  ))}
-                                                </div>
-                                              )}
-                                              {tc.result && <div className="ai-tool-card-result">{tc.result.length > 200 ? tc.result.slice(0, 200) + '...' : tc.result}</div>}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    )}
-                                    {msg.role === 'assistant' ? (
-                                      <div
-                                        className="ai-message-content ai-message-markdown markdown-preview-body"
-                                        dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(msg.content) }}
-                                      />
-                                    ) : (
-                                      <div className="ai-message-content">{msg.content}</div>
-                                    )}
-                                  </div>
-                                ))}
+                                <AIChatMessageList
+                                  messages={aiChatMessages}
+                                  variant="center"
+                                  emptyTitle={t.aiNoResponse}
+                                  emptyHint={t.aiChatEmptyHint || 'Type a question below or use a quick prompt to get started.'}
+                                  locale={language === 'zh-CN' ? 'zh' : 'en'}
+                                  showEmpty={false}
+                                />
                                 {aiBusy && aiLiveToolCalls.length > 0 && (
                                   <div className="ai-message ai-message-assistant">
                                     <div className="ai-message-header">
@@ -4115,7 +4158,9 @@ const App: React.FC = () => {
                                             try {
                                               const loaded = await api.aiLoadConversation(vaultPath, item.file);
                                               if (Array.isArray(loaded)) {
-                                                setAiChatMessages(loaded as AIChatMessage[]);
+                                                const displayMessages = normalizeDisplayAIChatMessages(loaded).filter((message) => message.role !== 'system');
+                                                suppressAiConversationSaveRef.current = true;
+                                                setAiChatMessages(displayMessages);
                                                 setAiShowHistory(false);
                                               }
                                             } catch {}
@@ -4134,9 +4179,20 @@ const App: React.FC = () => {
                                       </div>
                                     )}
                                   </div>
-                                  <button className="ai-send-btn" disabled={aiBusy || !aiInput.trim() || !aiConfig.hasApiKey} onClick={() => handleAISendChat(aiInput)}>
-                                    {aiBusy ? t.aiSending : t.aiSend}
-                                  </button>
+                                  {!aiBusy && aiRetryPrompt && (
+                                    <button className="center-ai-retry-btn" onClick={() => handleAISendChat(aiRetryPrompt)}>
+                                      {t.aiRetryLast}
+                                    </button>
+                                  )}
+                                  {aiSending ? (
+                                    <button className="ai-send-btn ai-stop-btn" onClick={handleAICancelChat}>
+                                      {t.aiStopGenerating}
+                                    </button>
+                                  ) : (
+                                    <button className="ai-send-btn" disabled={aiBusy || !aiInput.trim() || !aiConfig.hasApiKey} onClick={() => handleAISendChat(aiInput)}>
+                                      {aiBusy ? t.aiSending : t.aiSend}
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -4482,11 +4538,15 @@ const App: React.FC = () => {
               aiControlMode={aiControlMode}
               aiContextUsage={visibleAIContextUsage}
               aiSending={aiBusy}
+              aiCanCancel={aiSending}
+              aiCanRetry={!aiBusy && Boolean(aiRetryPrompt)}
               aiCopiedResponse={aiCopiedResponse}
               onAIInputChange={setAiInput}
               onAIContextModeChange={setAiContextMode}
               onAIControlModeChange={setAiControlMode}
               onAISendChat={handleAISendChat}
+              onAICancelChat={handleAICancelChat}
+              onAIRetryLast={() => handleAISendChat(aiRetryPrompt)}
               onAIImportTasksToSchedule={handleAIImportTasksToSchedule}
               onRefreshVault={async () => {
                 await refreshTree();

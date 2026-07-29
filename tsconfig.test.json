@@ -4,6 +4,7 @@
     "lib": ["ES2020", "DOM"],
     "module": "CommonJS",
     "moduleResolution": "node",
+    "jsx": "react-jsx",
     "outDir": "dist-test",
     "rootDir": ".",
     "strict": true,
@@ -17,9 +18,20 @@
     "src/utils/markdownRenderer.ts",
     "src/utils/workspaceSession.ts",
     "src/utils/aiIdentity.ts",
+    "src/utils/aiChatPresentation.ts",
+    "src/utils/searchHighlight.ts",
+    "src/utils/coalescedAsyncRunner.ts",
+    "src/utils/debouncedLatestWriter.ts",
     "src/utils/gameDesignSpecialists.ts",
     "src/utils/aiClient.ts",
+    "src/utils/gameWorkspaceHelper.ts",
+    "src/utils/gameWorkspaceScanner.ts",
+    "src/templates.ts",
     "src/utils/graphInteraction.ts",
-    "src/utils/graphBuilder.ts"
+    "src/utils/graphBuilder.ts",
+    "electron/aiRequestRegistry.ts",
+    "electron/aiVaultScanner.ts",
+    "electron/aiVaultRetriever.ts",
+    "electron/aiContextWindow.ts"
   ]
 }
