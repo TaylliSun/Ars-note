@@ -21,6 +21,7 @@ export interface ReportInput {
 
 const DOC_TYPE_LABELS: Record<GameDocType, string> = {
   gdd: 'GDD',
+  coreLoop: 'Core Gameplay Loop',
   worldbuilding: 'Worldbuilding',
   story: 'Story / Plot',
   dialogue: 'Dialogue',
@@ -76,6 +77,7 @@ export function buildGameWorkspaceReportMarkdown(input: ReportInput): string {
   lines.push('|--------|-------|');
   lines.push(`| Total Game Docs | ${summary.totalGameDocs} |`);
   lines.push(`| GDD | ${summary.gddCount} |`);
+  lines.push(`| Core Gameplay Loop | ${summary.coreLoopCount} |`);
   lines.push(`| Worldbuilding | ${summary.worldbuildingCount} |`);
   lines.push(`| Story / Plot | ${summary.storyCount} |`);
   lines.push(`| Dialogue | ${summary.dialogueCount} |`);
@@ -112,7 +114,7 @@ export function buildGameWorkspaceReportMarkdown(input: ReportInput): string {
   lines.push('## All Game Docs');
   lines.push('');
 
-  const types: GameDocType[] = ['gdd', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
+  const types: GameDocType[] = ['gdd', 'coreLoop', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
   for (const docType of types) {
     const groupEntries = entries.filter((e) => e.type === docType);
     if (groupEntries.length === 0) continue;

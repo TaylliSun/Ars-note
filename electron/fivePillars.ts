@@ -3,6 +3,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { tokenizeVaultRetrievalText } from './aiVaultRetriever';
 
 /* ── Helpers ── */
 
@@ -404,11 +405,22 @@ export function getRelevantSkills(vp: string, query: string): string {
   const skills = listSkills(vp);
   if (skills.length === 0) return '';
   const queryLower = query.toLowerCase();
-  const relevant = skills.filter(s => {
-    const searchText = (s.name + ' ' + s.trigger + ' ' + s.description).toLowerCase();
-    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
-    return queryWords.some(w => searchText.includes(w));
-  });
+  const queryTokens = tokenizeVaultRetrievalText(queryLower, 64);
+  const relevant = skills
+    .map(skill => {
+      const searchText = `${skill.name} ${skill.trigger} ${skill.description} ${skill.steps}`.toLowerCase();
+      let score = 0;
+      if (skill.trigger && queryLower.includes(String(skill.trigger).toLowerCase())) score += 20;
+      for (const token of queryTokens) {
+        if (searchText.includes(token)) score += token.length >= 4 ? 3 : 1;
+      }
+      score += Math.min(3, Number(skill.useCount || 0)) * 0.25;
+      score += Math.max(0, Math.min(100, Number(skill.successRate || 0))) / 200;
+      return { skill, score };
+    })
+    .filter(item => item.score >= 2)
+    .sort((left, right) => right.score - left.score)
+    .map(item => item.skill);
   if (relevant.length === 0) return '';
   return relevant.slice(0, 3).map(s => `### Skill: ${s.name}\nTrigger: ${s.trigger}\n${s.steps}`).join('\n\n');
 }

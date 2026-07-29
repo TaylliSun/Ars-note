@@ -977,6 +977,7 @@ export interface SelfHostedCredentialStatus {
 
 export type GameDocType =
   | 'gdd'
+  | 'coreLoop'
   | 'worldbuilding'
   | 'story'
   | 'dialogue'
@@ -1002,6 +1003,7 @@ export interface GameWorkspaceEntry {
 
 export interface GameWorkspaceSummary {
   gddCount: number;
+  coreLoopCount: number;
   worldbuildingCount: number;
   storyCount: number;
   dialogueCount: number;
@@ -1376,7 +1378,10 @@ export interface AIResponse {
   ok: boolean;
   content?: string;
   error?: string;
+  cancelled?: boolean;
+  timedOut?: boolean;
   model?: string;
+  contextUsage?: AIContextUsage;
   createdAt: string;
   toolCalls?: AIToolCallRecord[];
 }
@@ -1635,7 +1640,8 @@ export interface ArsNoteAPI {
   aiSyncStatus: (vaultPath: string) => Promise<{ ok: boolean; hasData: boolean; syncedAt: string; fileCount: number; files: string[] }>;
   aiStartAutoSync: (vaultPath: string) => Promise<void>;
   aiStopAutoSync: () => Promise<void>;
-  sendAIChat: (vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: AIControlMode }) => Promise<AIResponse>;
+  sendAIChat: (vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: AIControlMode; requestId?: string }) => Promise<AIResponse>;
+  cancelAIChat: (requestId: string) => Promise<{ ok: boolean }>;
   onAIToolProgress: (callback: (data: { name: string; args: Record<string, string>; status: string }) => void) => () => void;
   aiInitMemory: (vp: string) => Promise<void>;
   aiGetMemoryStatus: (vp: string) => Promise<AIMemoryStatus>;

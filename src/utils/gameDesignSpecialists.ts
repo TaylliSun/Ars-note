@@ -28,6 +28,8 @@ export interface GameDesignSpecialistRoute {
 
 const PLANNING_INTENT_RE = /策划|设计案|策划案|需求文档|玩法|机制|系统|数值|平衡|经济|成长|关卡|战斗|技能|剧情|世界观|任务(?:设计|策划|系统|表|流程|链)|台词|演出|cutscene|unity|技术方案|架构|编辑器|工具链|\bui\b|\bux\b|交互|商业化|付费|活动设计|留存|gdd|game\s*design|system\s*design|level\s*design|combat\s*design|technical\s*design|economy|balance|progression|quest|narrative|live\s*ops/i;
 
+const CORE_LOOP_INTENT_RE = /核心(?:玩法|体验)?循环|游戏(?:玩法)?循环|玩法闭环|行为闭环|秒级循环|局内循环|单局循环|会话循环|局外循环|成长循环|长期循环|core\s*(?:gameplay\s*)?loop|gameplay\s*loop|moment[-\s]to[-\s]moment|session\s*loop|meta\s*loop|progression\s*loop/i;
+
 export const GAME_DESIGN_SPECIALISTS: GameDesignSpecialistDefinition[] = [
   {
     id: 'lead',
@@ -52,13 +54,15 @@ export const GAME_DESIGN_SPECIALISTS: GameDesignSpecialistDefinition[] = [
     mission: '把玩家目标转化为可实现、可配置、可验证的规则系统。',
     evidencePaths: ['01_GDD/', '05_Items/', '06_Quests/', '07_Unity_Tasks/'],
     outputContract: [
-      '玩家循环、功能边界、前置条件、状态机和完整规则表',
-      '资源来源/消耗、解锁、失败、回退、中断、异常与防滥用规则',
+      '玩家承诺、核心动词，以及秒级操作、单局/任务、会话、局外成长和长期目标之间的循环层级',
+      '每个循环步骤的玩家意图、输入、规则、反馈、奖励/成本、关键选择和回到下一轮的条件',
+      '资源来源/转化/储存/消耗、解锁、失败、回退、中断、异常与防滥用规则',
       '配置字段、默认值、枚举、持久化和跨系统事件',
       'UI 反馈、埋点、验收用例和边界回归清单',
     ],
     signals: [
-      { pattern: /系统策划|系统设计|玩法系统|功能系统|核心循环|状态机|规则|解锁|背包|养成|建造|合成|采集|交互机制/i, weight: 6, reason: '包含系统规则或玩法循环' },
+      { pattern: CORE_LOOP_INTENT_RE, weight: 10, reason: '请求设计跨时间尺度的核心玩法循环' },
+      { pattern: /系统策划|系统设计|玩法系统|功能系统|状态机|规则|解锁|背包|养成|建造|合成|采集|交互机制/i, weight: 6, reason: '包含系统规则或玩法循环' },
       { pattern: /机制|玩法|资源流|冷却|触发|条件|限制/i, weight: 3, reason: '需要规则和状态定义' },
     ],
     defaultReviewers: ['economy', 'technical'],
@@ -201,6 +205,7 @@ export function routeGameDesignSpecialists(input: {
   const currentFilePath = String(input.currentFilePath || '');
   const source = `${prompt}\n${currentFilePath}`;
   if (!PLANNING_INTENT_RE.test(source)) return null;
+  const isCoreLoopRequest = CORE_LOOP_INTENT_RE.test(source);
 
   const scored = GAME_DESIGN_SPECIALISTS.map((specialist) => {
     let score = 0;
@@ -214,6 +219,18 @@ export function routeGameDesignSpecialists(input: {
     if (specialist.id === 'level' && /04_Maps/i.test(currentFilePath)) score += 4;
     if (specialist.id === 'technical' && /07_Unity_Tasks|10_SystemDesign/i.test(currentFilePath)) score += 4;
     if (specialist.id === 'system' && /01_GDD/i.test(currentFilePath)) score += 2;
+    if (isCoreLoopRequest && specialist.id === 'system') {
+      score += 6;
+      reasons.push('核心循环由系统策划负责闭环规则和层级关系');
+    }
+    if (isCoreLoopRequest && specialist.id === 'economy') {
+      score += 4;
+      reasons.push('核心循环需要校验奖励、产消和成长回流');
+    }
+    if (isCoreLoopRequest && specialist.id === 'ux') {
+      score += 4;
+      reasons.push('核心循环需要校验反馈、决策可读性和重入成本');
+    }
     return { specialist, score, reasons };
   }).sort((a, b) => b.score - a.score);
 
@@ -256,6 +273,19 @@ export function buildGameDesignSpecialistBrief(input: {
     ...route.primary.evidencePaths,
     ...route.reviewers.flatMap((reviewer) => reviewer.evidencePaths),
   ])).slice(0, 8);
+  const source = `${input.prompt}\n${input.currentFilePath || ''}`;
+  const coreLoopProtocol = CORE_LOOP_INTENT_RE.test(source)
+    ? [
+        'Core loop design protocol:',
+        '- Start with the player promise, target emotion, play context, core verbs, and meaningful decisions. A feature list is not a loop.',
+        '- Model at least four connected horizons: moment-to-moment (seconds), encounter/task (minutes), session, and meta/long-term progression. State how the output of each horizon becomes the input or motivation for the next.',
+        '- For every step specify: player intent -> input/action -> system rule/state change -> immediate feedback -> reward/cost -> decision -> re-entry condition. Reject any dead end, reward without a new decision, or progression that bypasses the core verbs.',
+        '- Map resource sources, transformations, storage/caps, sinks, gates, reset points, failure/recovery, interruption/resume, catch-up, and exploit pressure.',
+        '- Show early/mid/late variants and the content-production burden. Repetition must gain new decisions, mastery, expression, or stakes rather than only larger numbers.',
+        '- Define a smallest playable loop prototype, observation plan, telemetry events, success/failure interpretation, and the design decision each result will trigger. Do not invent target metrics without project evidence.',
+        '- Treat retention as sustained player value and clear goals; flag compulsion, fatigue, pay pressure, or dark-pattern risks instead of optimizing them silently.',
+      ]
+    : [];
 
   return [
     '=== Professional Game Design Studio Brief ===',
@@ -275,6 +305,7 @@ export function buildGameDesignSpecialistBrief(input: {
     '- Use numbers with units, baselines, formulas, examples, ranges, caps, and tuning ownership whenever the design is quantitative.',
     '- Run contradiction, exploit, edge-case, failure/recovery, save/migration, performance, accessibility, localization, and QA checks where relevant.',
     '- Convert approved design into discipline-tagged tasks with dependency, estimate, linked document, acceptance, QA/retest, and status. Do not write team schedule tasks unless the user asked to create/assign/take over work.',
+    ...coreLoopProtocol,
     'Completion gate:',
     '- Do not claim quality scores such as 100/100. Report Passed, Needs review, or Blocked for each applicable gate and name the exact unresolved evidence.',
   ].join('\n');
@@ -289,6 +320,7 @@ For game-planning work, follow the Professional Game Design Studio Brief supplie
 - Inspect project evidence before changing an existing design. Preserve canon and existing production decisions unless the user asks for a redesign.
 - Write for implementation and review, not for inspiration alone. Every major decision needs behavior, data/config, feedback, owner, acceptance, and risk implications.
 - Mark confirmed facts, decisions, assumptions, and open questions separately.
+- For core-loop work, prove the re-entry link between moment-to-moment play, session goals, progression, and long-term motivation. A list of systems or rewards is not a loop.
 - For revisions, include a concise change-impact section covering affected documents, systems, data, UI, engineering, content, QA, schedule, and migration.
 - For professional documents, finish with discipline review gates and concrete next tasks. Do not invent a numeric quality score.
 `;

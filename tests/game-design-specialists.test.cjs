@@ -16,6 +16,16 @@ test('routes a resource-loop feature to system design with economy and technical
   assert.deepEqual(route.reviewers.map((item) => item.id), ['economy', 'technical']);
 });
 
+test('routes core-loop design to system with economy and UX cross-review', () => {
+  const route = routeGameDesignSpecialists({
+    prompt: '重新设计核心玩法循环，打通秒级操作、单次会话、局外成长和长期目标。',
+    currentFilePath: '01_GDD/GameplayLoop.md',
+  });
+  assert.equal(route.primary.id, 'system');
+  assert.deepEqual(route.reviewers.map((item) => item.id), ['economy', 'ux']);
+  assert.match(route.matchedReasons.join('\n'), /核心循环/);
+});
+
 test('routes formulas and balancing work to economy design', () => {
   const route = routeGameDesignSpecialists({
     prompt: '完善角色成长曲线和伤害公式，给出变量单位、概率、上限、演算样例和调参区间。',
@@ -55,6 +65,17 @@ test('specialist brief requires evidence, traceability, cross-review, and non-nu
   assert.match(brief, /Do not claim quality scores such as 100\/100/);
 });
 
+test('core-loop brief requires connected horizons, re-entry, prototype evidence, and ethical retention', () => {
+  const brief = buildGameDesignSpecialistBrief({
+    prompt: '设计游戏核心循环和会话循环。',
+    currentFilePath: '01_GDD/GameplayLoop.md',
+  });
+  assert.match(brief, /moment-to-moment/);
+  assert.match(brief, /re-entry condition/);
+  assert.match(brief, /smallest playable loop prototype/);
+  assert.match(brief, /dark-pattern risks/);
+});
+
 test('AI requests inject the selected professional design studio brief', () => {
   const request = buildAIChatRequest('设计一套技能战斗系统，包含前摇、命中、伤害和打击反馈。', {
     contextMode: 'gameWorkspace',
@@ -74,5 +95,16 @@ test('professional design review quick prompt is read-only and invokes disciplin
   assert.equal(prompt.contextMode, 'currentNote');
   assert.match(prompt.prompt, /read-only review/i);
   assert.match(prompt.prompt, /Passed, Needs review, or Blocked/);
+  assert.doesNotMatch(prompt.prompt, /create_canvas|create_wireframe/);
+});
+
+test('core-loop quick prompt writes one Markdown spec without unrelated visual artifacts', () => {
+  const prompt = QUICK_PROMPTS.find((item) => item.id === 'design-core-gameplay-loop');
+  assert.ok(prompt);
+  assert.equal(prompt.contextMode, 'gameWorkspace');
+  assert.match(prompt.prompt, /01_GDD\/GameplayLoop\.md/);
+  assert.match(prompt.prompt, /moment-to-moment/);
+  assert.match(prompt.prompt, /economy and UX cross-review/i);
+  assert.match(prompt.prompt, /Passed\/Needs review\/Blocked/);
   assert.doesNotMatch(prompt.prompt, /create_canvas|create_wireframe/);
 });

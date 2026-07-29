@@ -21,6 +21,7 @@ export interface NarrativeProductionKitFile {
 
 const DOC_CONFIG: Record<GameDocType, { templateId: string; folder: string; defaultFileName: string }> = {
   gdd: { templateId: 'gdd', folder: '01_GDD', defaultFileName: 'NewGDD.md' },
+  coreLoop: { templateId: 'core-gameplay-loop', folder: '01_GDD', defaultFileName: 'GameplayLoop.md' },
   worldbuilding: { templateId: 'worldbuilding', folder: '02_Worldbuilding', defaultFileName: 'WorldOverview.md' },
   story: { templateId: 'plot-outline', folder: '02_Worldbuilding', defaultFileName: 'PlotOutline.md' },
   dialogue: { templateId: 'dialogue-script', folder: '02_Worldbuilding', defaultFileName: 'DialogueScript.md' },

@@ -5138,6 +5138,12 @@ body.light-theme .markdown-preview-body .md-table tr:hover .md-td {
   padding: 3px 8px;
   border-radius: var(--radius-sm);
 }
+.search-result-highlight {
+  padding: 0 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 68%, transparent);
+  color: var(--text-main);
+}
 .search-no-results {
   display: flex;
   align-items: center;
@@ -12794,6 +12800,39 @@ body.light-theme .backup-file-restore-row {
   border-radius: 3px;
 }
 
+.ai-chat-load-older {
+  width: fit-content;
+  max-width: calc(100% - 16px);
+  margin: 2px auto 12px;
+  padding: 6px 11px;
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ai-chat-load-older:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.ai-chat-load-older > span {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-chat-load-older > small {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 400;
+}
+
 /* ── Empty Chat State ── */
 .ai-chat-empty {
   display: flex;
@@ -15924,6 +15963,39 @@ body.light-theme .live-preview-active .cm-lp-table-line-metadata:nth-child(even)
 
 body.light-theme .live-preview-active .cm-lp-table-line-widget:hover .cm-lp-table-line-cell {
   background: #eef6ff !important;
+}
+
+/* AI request lifecycle controls */
+.ai-send-btn.ai-stop-btn,
+body:not(.light-theme) .ai-send-btn.ai-stop-btn {
+  color: #ffd7d7 !important;
+  background: rgba(177, 63, 63, 0.18) !important;
+  border: 1px solid rgba(229, 101, 101, 0.42) !important;
+}
+
+.ai-send-btn.ai-stop-btn:hover,
+body:not(.light-theme) .ai-send-btn.ai-stop-btn:hover {
+  color: #fff !important;
+  background: rgba(196, 69, 69, 0.3) !important;
+  border-color: rgba(242, 121, 121, 0.7) !important;
+}
+
+.center-ai-retry-btn {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.center-ai-retry-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+  background: var(--bg-hover);
 }
 
 /* Team workbench v3 final cascade overrides */

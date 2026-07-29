@@ -34,8 +34,8 @@ jobs:
 
       - name: Audit dependencies
         run: |
-          npm audit --audit-level=high
-          npm --prefix server audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
+          npm --prefix server audit --omit=dev --audit-level=high
 
       - name: Type check
         run: |

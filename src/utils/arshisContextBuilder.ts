@@ -13,6 +13,7 @@ import type {
 
 const DOC_TYPE_LABELS: Record<GameDocType, string> = {
   gdd: 'GDD',
+  coreLoop: 'Core Gameplay Loop',
   worldbuilding: 'Worldbuilding',
   story: 'Story / Plot',
   dialogue: 'Dialogue',
@@ -25,7 +26,7 @@ const DOC_TYPE_LABELS: Record<GameDocType, string> = {
   devlog: 'Devlog',
 };
 
-const ALL_DOC_TYPES: GameDocType[] = ['gdd', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
+const ALL_DOC_TYPES: GameDocType[] = ['gdd', 'coreLoop', 'worldbuilding', 'story', 'dialogue', 'performance', 'character', 'item', 'quest', 'taskTable', 'unityTask', 'devlog'];
 
 function entriesByType(entries: GameWorkspaceEntry[], type: GameDocType): GameWorkspaceEntry[] {
   return entries.filter((e) => e.type === type);
@@ -54,6 +55,9 @@ function buildRecommendedNextSteps(
 
   if (summary.gddCount === 0) {
     steps.push('Create a Game Design Document (GDD) first — it defines the core vision.');
+  }
+  if (summary.coreLoopCount === 0) {
+    steps.push('Define the core gameplay loop across moment-to-moment, session, and long-term progression before expanding content.');
   }
   if (summary.worldbuildingCount === 0) {
     steps.push('Create a worldbuilding overview to define setting rules, regions, factions, timeline, and lore constraints.');
@@ -142,6 +146,7 @@ export function buildArshisContextMarkdown(context: ArshisGameContext): string {
   lines.push('|--------|-------|');
   lines.push(`| Total Game Docs | ${summary.totalGameDocs} |`);
   lines.push(`| GDD | ${summary.gddCount} |`);
+  lines.push(`| Core Gameplay Loop | ${summary.coreLoopCount} |`);
   lines.push(`| Worldbuilding | ${summary.worldbuildingCount} |`);
   lines.push(`| Story / Plot | ${summary.storyCount} |`);
   lines.push(`| Dialogue | ${summary.dialogueCount} |`);

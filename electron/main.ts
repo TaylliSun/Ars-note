@@ -15,6 +15,15 @@ import {
   evaluateAIToolCall,
   isAIToolMutationName,
 } from './aiTaskPolicy';
+import { AIRequestRegistry } from './aiRequestRegistry';
+import { clearAIVaultScanCache, scanAndIndexVault, type VaultFileEntry } from './aiVaultScanner';
+import { AI_RUNTIME_CONTEXT_TOKEN_LIMIT, fitAIContextWindow, type AIContextWindowUsage } from './aiContextWindow';
+import { extractAIUserIntentText, retrieveRelevantVaultContext } from './aiVaultRetriever';
+import {
+  parseVaultTerminologyPaths,
+  planVaultTermRefactor,
+  searchVaultText,
+} from './aiVaultTerminology';
 import { startLiveSync, stopLiveSync, getLiveSyncStatus, getLiveSyncHealthSnapshot, pushLiveFileContent, trustLocalSnapshotForInitialLiveSyncUpload, resumeLiveSyncAfterStaleBaselineReview, resumeLiveSyncAfterDeleteStormReview, resumeLiveSyncAfterDestructiveTruncationReview, publishLocalSnapshotAsServerAuthority, getLiveSyncSafeDeleteQueue, clearLiveSyncSafeDeleteQueue, applyLiveSyncSafeDeleteQueue, normalizeLiveSyncServerUrl, normalizeLiveSyncConnectionMode, isPreflightBaselineStaleAgainstRemote, shouldTriggerDeleteStormGuard, canSendLiveWriteAfterPreflight, shouldGuardDestructiveTruncation, shouldHoldMissingBaseQueuedWriteInJoin, shouldApplyServerAuthorityOverIncomingConflictInMode, getJoinSnapshotAuthorityDecision, isLiveSyncRecoveryArchivePath, isUserVisibleConflictArtifactPath } from './liveSync';
 import type { LiveSyncConfig, LiveSyncConnectionMode } from './liveSync';
 
@@ -54,7 +63,7 @@ const DOWNLOADS_DIR = 'downloads';
 const VAULT_CONFIG_FILE = 'vault.json';
 const SETTINGS_FILE = 'settings.json';
 const APP_VERSION = (() => {
-  try { return app.getVersion() || '1.5.64'; } catch { return '1.5.64'; }
+  try { return app.getVersion() || '1.5.69'; } catch { return '1.5.69'; }
 })();
 const LIVE_SYNC_CONFIG_FILE = path.join(app.getPath('userData'), 'live-sync-configs.json');
 const AI_RUNTIME_CONFIG_FILE = path.join(app.getPath('userData'), 'ai-runtime-configs.json');
@@ -1695,6 +1704,7 @@ function createWindow(): void {
     minHeight: 600,
     title: 'Ars-note',
     backgroundColor: '#1b2027',
+    show: process.env.ARS_NOTE_SMOKE_TEST !== '1',
     frame: false,
     titleBarStyle: 'hidden',
     autoHideMenuBar: true,
@@ -12477,6 +12487,24 @@ const AI_FILE_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'search_vault_text',
+      description: 'Search all Markdown documents in the vault for an exact text term. Returns every matching path, line, context preview, and whether the match is inside a fenced code block. Use this before and after any cross-document terminology or canon change.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Exact text to find, such as an old design term or outdated canonical name.' },
+          path_scope: { type: 'string', description: 'Optional vault-relative folder or Markdown file to search. Leave empty to search the whole vault.' },
+          paths: { type: 'string', description: 'Optional JSON array, comma-separated list, or newline-separated list of exact Markdown paths to search.' },
+          case_sensitive: { type: 'boolean', description: 'Whether matching is case-sensitive. Defaults to false.' },
+          max_results: { type: 'integer', description: 'Maximum detailed matches to return, from 1 to 1000. The total match count is still reported.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'write_file',
       description: 'Create or overwrite a file in the vault immediately when the user asked for it. The app saves live-history and an AI rollback snapshot before applying the change.',
       parameters: {
@@ -12486,6 +12514,24 @@ const AI_FILE_TOOLS = [
           content: { type: 'string', description: 'The full file content to write' },
         },
         required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'refactor_vault_term',
+      description: 'Apply a reviewed terminology/canon migration across an explicit list of Markdown files. Replaces the old term, preserves fenced code blocks by default, saves live-history and one rollback snapshot for the full batch, then reports residual old-term matches. Always call search_vault_text first and pass only semantically relevant paths.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', description: 'Exact outdated term to replace.' },
+          to: { type: 'string', description: 'Exact new canonical term.' },
+          paths: { type: 'string', description: 'Required JSON array, comma-separated list, or newline-separated list of reviewed Markdown file paths.' },
+          case_sensitive: { type: 'boolean', description: 'Whether matching is case-sensitive. Defaults to false.' },
+          replace_in_code_blocks: { type: 'boolean', description: 'Whether to replace occurrences inside fenced code blocks. Defaults to false.' },
+        },
+        required: ['from', 'to', 'paths'],
       },
     },
   },
@@ -13892,6 +13938,7 @@ const AI_PENDING_OPERATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const AI_MUTATING_TOOLS = new Set([
   'write_file',
   'append_file',
+  'refactor_vault_term',
   'delete_file',
   'delete_files',
   'create_folder',
@@ -13907,6 +13954,7 @@ const AI_MUTATING_TOOLS = new Set([
 
 const AI_READONLY_TOOLS = new Set([
   'read_file',
+  'search_vault_text',
   'list_files',
   'list_images',
   'read_team_schedule',
@@ -13922,6 +13970,7 @@ const AI_MEMBER_TOOLS = new Set([
   ...AI_READONLY_TOOLS,
   'write_file',
   'append_file',
+  'refactor_vault_term',
   'delete_file',
   'delete_files',
   'create_folder',
@@ -14135,6 +14184,11 @@ function aiRollbackRootsForOperation(toolName: string, args: Record<string, stri
       return uniqueAIRollbackRoots([{ relativePath: rawPath, includeMissingFile: true }]);
     case 'delete_files':
       return uniqueAIRollbackRoots(parseAIDeleteFilePaths(args).map((relativePath) => ({
+        relativePath,
+        includeMissingFile: true,
+      })));
+    case 'refactor_vault_term':
+      return uniqueAIRollbackRoots(parseVaultTerminologyPaths((args as any).paths).map((relativePath) => ({
         relativePath,
         includeMissingFile: true,
       })));
@@ -14959,6 +15013,17 @@ function buildAIToolMutationPreview(vaultPath: string, toolName: string, args: R
     } catch { /* path errors already reported above */ }
     lines.push('Safety: applying will save live-history before append and create an AI rollback snapshot.');
     lines.push(`Append preview: ${summarizeAITextSample(content)}`);
+  } else if (toolName === 'refactor_vault_term') {
+    const from = String((args as any).from || '');
+    const to = String((args as any).to || '');
+    const paths = parseVaultTerminologyPaths((args as any).paths);
+    lines.push(`Will migrate terminology in ${paths.length} explicit Markdown file(s).`);
+    lines.push(`Old term: ${summarizeAITextSample(from, 120)}`);
+    lines.push(`New term: ${summarizeAITextSample(to, 120)}`);
+    lines.push(`Fenced code blocks: ${parseAIToolBooleanArg((args as any).replace_in_code_blocks, false) ? 'included' : 'preserved'}.`);
+    for (const relativePath of paths.slice(0, 30)) lines.push(`- ${relativePath}`);
+    if (paths.length > 30) lines.push(`- ... ${paths.length - 30} more file(s).`);
+    lines.push('Safety: each changed file saves live-history, and the full batch receives one AI rollback snapshot.');
   } else if (toolName === 'delete_file') {
     const relPath = normalizeVaultRelativePath(rawPath);
     lines.push(`Protected path check: ${isProtectedAIFileDeletePath(relPath) ? 'blocked' : 'allowed file path'}.`);
@@ -15331,6 +15396,19 @@ async function executeAITool(vaultPath: string, toolName: string, args: Record<s
       if (content.length > 50000) return content.slice(0, 50000) + '\n\n... (truncated, file is too large)';
       return content;
     }
+    case 'search_vault_text': {
+      try {
+        const result = searchVaultText(vaultPath, String((args as any).query || ''), {
+          pathScope: String((args as any).path_scope || ''),
+          paths: (args as any).paths,
+          caseSensitive: parseAIToolBooleanArg((args as any).case_sensitive, false),
+          maxMatches: Math.max(1, Math.min(1000, Number((args as any).max_results || 300) || 300)),
+        });
+        return JSON.stringify(result, null, 2);
+      } catch (err: any) {
+        return `Error: ${err?.message || 'Vault text search failed'}`;
+      }
+    }
     case 'write_file': {
       let target;
       try { target = resolveToolPath(rawPath); } catch (err: any) { return `Error: ${err.message}`; }
@@ -15431,6 +15509,62 @@ async function executeAITool(vaultPath: string, toolName: string, args: Record<s
       return humanized.changed
         ? `File written successfully: ${relPath}. Auto-humanized Markdown cleanup: ${humanized.count} change(s).`
         : `File written successfully: ${relPath}`;
+    }
+    case 'refactor_vault_term': {
+      try {
+        const caseSensitive = parseAIToolBooleanArg((args as any).case_sensitive, false);
+        const replaceInCodeBlocks = parseAIToolBooleanArg((args as any).replace_in_code_blocks, false);
+        const plan = planVaultTermRefactor(vaultPath, {
+          from: String((args as any).from || ''),
+          to: String((args as any).to || ''),
+          paths: (args as any).paths,
+          caseSensitive,
+          replaceInCodeBlocks,
+        });
+        const changed: Array<{ path: string; replacementCount: number }> = [];
+        const failed: Array<{ path: string; error: string }> = [];
+
+        for (const item of plan.changed) {
+          try {
+            saveLiveHistoryBeforeOverwrite(item.fullPath, item.after, 'ai-terminology-migration');
+            fs.writeFileSync(item.fullPath, item.after, 'utf-8');
+            changed.push({ path: item.path, replacementCount: item.replacementCount });
+          } catch (err: any) {
+            failed.push({ path: item.path, error: err?.message || 'write-failed' });
+          }
+        }
+
+        clearAIVaultScanCache(vaultPath);
+        const residual = searchVaultText(vaultPath, plan.from, {
+          paths: plan.requestedPaths,
+          caseSensitive,
+          maxMatches: 500,
+        });
+        const actionableResiduals = residual.matches.filter(match => (
+          replaceInCodeBlocks || !match.inCodeBlock
+        ));
+        const preservedCodeBlockResiduals = residual.matches.filter(match => match.inCodeBlock);
+        return JSON.stringify({
+          ok: failed.length === 0 && actionableResiduals.length === 0,
+          from: plan.from,
+          to: plan.to,
+          requestedFileCount: plan.requestedPaths.length,
+          changedFileCount: changed.length,
+          replacementCount: changed.reduce((sum, item) => sum + item.replacementCount, 0),
+          changed,
+          unchanged: plan.unchanged,
+          skipped: plan.skipped,
+          failed,
+          preservedCodeBlockMatchCount: preservedCodeBlockResiduals.length,
+          preservedCodeBlockMatches: preservedCodeBlockResiduals.slice(0, 40),
+          residualMatchCount: residual.matchCount,
+          actionableResidualCount: actionableResiduals.length,
+          actionableResiduals: actionableResiduals.slice(0, 80),
+          verificationTruncated: residual.truncated,
+        }, null, 2);
+      } catch (err: any) {
+        return `Error: ${err?.message || 'Vault terminology migration failed'}`;
+      }
     }
     case 'delete_file': {
       let target;
@@ -16289,6 +16423,27 @@ function inferAIArtifactsFromTool(toolName: string, args: Record<string, string>
     }));
   }
 
+  if (toolName === 'refactor_vault_term') {
+    try {
+      const parsed = JSON.parse(result);
+      const changed = Array.isArray(parsed?.changed) ? parsed.changed : [];
+      return changed.slice(0, 100).map((item: any) => ({
+        path: normalizeVaultRelativePath(String(item?.path || '')),
+        type: 'markdown',
+        action: 'updated',
+        qualityStatus: 'checked',
+        notes: [
+          `Terminology migration replaced ${Number(item?.replacementCount || 0)} occurrence(s).`,
+          parsed?.actionableResidualCount > 0
+            ? `${Number(parsed.actionableResidualCount || 0)} actionable old-term match(es) remain in the reviewed scope.`
+            : 'Post-write search found no actionable old-term matches in the reviewed scope.',
+        ],
+      } as AIArtifactSummary)).filter((item: AIArtifactSummary) => !!item.path);
+    } catch {
+      return [];
+    }
+  }
+
   if (toolName === 'delete_files') {
     const paths = parseAIDeleteFilePaths(args, 50);
     if (/AI operation preview only/i.test(result)) {
@@ -16444,65 +16599,6 @@ function inferAIArtifactsFromTool(toolName: string, args: Record<string, string>
   }];
 }
 
-/* ── Vault Scanner for AI Context (v0.9.6) ── */
-/* Scans all .md files once, produces both compact index text and full file entries
-   for reuse by vault index injection + smart relevance (Layer 2) */
-
-interface VaultFileEntry {
-  relPath: string;
-  fullPath: string;
-  title: string;
-  tags: string[];
-  content: string;
-}
-
-interface VaultScanResult {
-  indexText: string;
-  fileEntries: VaultFileEntry[];
-}
-
-function scanAndIndexVault(vp: string): VaultScanResult {
-  const resolved = path.resolve(vp);
-  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.cache', '__pycache__', '.ars-note', '.ai-memory']);
-  const indexLines: string[] = [];
-  const fileEntries: VaultFileEntry[] = [];
-
-  function walk(dir: string, prefix: string): void {
-    let items;
-    try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const item of items) {
-      if (SKIP_DIRS.has(item.name) || (item.name.startsWith('.') && item.name !== '.ars-note')) continue;
-      const full = path.join(dir, item.name);
-      const rel = prefix ? prefix + '/' + item.name : item.name;
-      if (item.isDirectory()) {
-        walk(full, rel);
-      } else if (item.name.endsWith('.md')) {
-        try {
-          const raw = fs.readFileSync(full, 'utf-8');
-          const h1Match = raw.match(/^#\s+(.+)$/m);
-          const title = h1Match ? h1Match[1].trim() : item.name.replace('.md', '');
-          const tags = [...new Set(raw.match(/(?:^|\s)#[a-zA-Z0-9_\u4e00-\u9fff][\w\u4e00-\u9fff-]*/g) || [])].map(t => t.trim()).slice(0, 5);
-          const tagStr = tags.length > 0 ? ' ' + tags.join(' ') : '';
-          indexLines.push(rel + ' \u2014 "' + title.slice(0, 60) + '"' + tagStr);
-          fileEntries.push({ relPath: rel, fullPath: full, title, tags, content: raw });
-        } catch { /* skip unreadable */ }
-      }
-    }
-  }
-  walk(resolved, '');
-
-  let indexText = '';
-  if (indexLines.length > 0) {
-    const capped = indexLines.slice(0, 200);
-    indexText = '=== VAULT FILE INDEX (' + capped.length + ' files) ===\n';
-    indexText += 'Use read_file(path) to read any file listed below.\n';
-    indexText += capped.join('\n');
-    if (indexLines.length > 200) indexText += '\n... and ' + (indexLines.length - 200) + ' more files';
-  }
-  return { indexText, fileEntries };
-}
-
-
 /* ── Smart File Relevance (Layer 2, v0.9.6) ── */
 /* Analyzes user query and auto-injects relevant file contents into context.
    This makes AI responses more accurate without requiring explicit read_file calls. */
@@ -16570,7 +16666,7 @@ function findRelevantFiles(entries: VaultFileEntry[], query: string, limit: numb
         if (tag.toLowerCase().includes(token)) score += 6;
       }
       /* Content mention (weighted less) */
-      const contentLower = file.content.toLowerCase();
+      const contentLower = file.searchContent;
       /* Count occurrences but cap at 5 for scoring */
       let count = 0;
       let idx = 0;
@@ -16781,7 +16877,7 @@ function shouldAutoCreateCanvasFromPrompt(prompt: string): boolean {
   return !hasMarkdownRepairIntent(prompt) && !hasHumanizerIntent(prompt) && hasStrictCanvasCreationIntent(prompt);
 }
 
-type AITaskPrimary = 'markdown-spec' | 'markdown-repair' | 'humanize' | 'canvas' | 'wireframe' | 'file-operation' | 'team-operation' | 'direct-answer';
+type AITaskPrimary = 'markdown-spec' | 'markdown-repair' | 'humanize' | 'terminology-migration' | 'canvas' | 'wireframe' | 'file-operation' | 'team-operation' | 'direct-answer';
 
 interface AITaskPolicy {
   primary: AITaskPrimary;
@@ -16901,6 +16997,12 @@ function getAIFileToolsForPolicy(policy: AITaskPolicy, controlMode: AIControlMod
     if (policy.primary === 'markdown-repair' || policy.primary === 'humanize') {
       return name === 'read_file' || name === 'write_file' || name === 'list_files';
     }
+    if (policy.primary === 'terminology-migration') {
+      return name === 'search_vault_text'
+        || name === 'refactor_vault_term'
+        || name === 'read_file'
+        || name === 'list_files';
+    }
     if (name === 'create_canvas') return policy.allowCanvas;
     if (name === 'create_wireframe') return policy.allowWireframe;
     return true;
@@ -16944,6 +17046,15 @@ function appendAIAutomatedVerification(
 
   if (['write_file', 'append_file', 'create_canvas', 'create_wireframe', 'create_folder'].includes(toolName)) {
     inspectPath(String(args.path || ''), 'present');
+  } else if (toolName === 'refactor_vault_term') {
+    try {
+      const parsed = JSON.parse(result);
+      const changed = Array.isArray(parsed?.changed) ? parsed.changed : [];
+      for (const item of changed.slice(0, 100)) inspectPath(String(item?.path || ''), 'present');
+      checks.push(`old-term residuals: ${Number(parsed?.actionableResidualCount || 0)} actionable, ${Number(parsed?.preservedCodeBlockMatchCount || 0)} preserved in code blocks`);
+    } catch {
+      checks.push('terminology migration result could not be parsed for verification');
+    }
   } else if (toolName === 'delete_file') {
     inspectPath(String(args.path || ''), 'deleted');
   } else if (toolName === 'delete_files') {
@@ -17000,7 +17111,15 @@ async function handleDirectAIOperationCommand(vaultPath: string, text: string, s
   };
 }
 
-ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: string }) => {
+const aiRequestRegistry = new AIRequestRegistry();
+
+ipcMain.handle('ai:cancelChat', async (event, requestId: string) => {
+  const normalizedRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+  if (!normalizedRequestId) return { ok: false };
+  return { ok: aiRequestRegistry.cancel(event.sender.id, normalizedRequestId) };
+});
+
+ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: string; requestId?: string }) => {
   const resolved = path.resolve(vaultPath);
   const cfg = aiCredentialsMap.get(resolved);
   if (!cfg || !cfg.baseUrl) return { ok: false, error: 'AI not configured', createdAt: new Date().toISOString() };
@@ -17008,20 +17127,29 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
   const fpc = FP.buildFivePillarContext(resolved);
 
   /* Scan vault once: produces both index text and file entries (v0.9.6) */
-  const vaultScan = scanAndIndexVault(resolved);
+  const vaultScan = await scanAndIndexVault(resolved);
 
   /* Smart file relevance (Layer 2, v0.9.6) — find files matching user's query */
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+  const lastUserText = extractAIUserIntentText(lastUserMsg?.content || '');
   const controlMode = normalizeAIControlMode(options?.controlMode);
-  const taskPolicy = buildAITaskContract(lastUserMsg?.content || '', controlMode);
+  const taskPolicy = buildAITaskContract(lastUserText, controlMode);
   const policyTools = getAIFileToolsForPolicy(taskPolicy, controlMode);
-  const relevantCtx = lastUserMsg ? findRelevantFiles(vaultScan.fileEntries, lastUserMsg.content, 3) : '';
+  const retrieval = lastUserMsg
+    ? retrieveRelevantVaultContext(vaultScan.fileEntries, lastUserText, {
+      maxChunks: 8,
+      maxChars: 14000,
+      maxChunksPerFile: 2,
+    })
+    : null;
+  const relevantCtx = retrieval?.contextText || '';
+  const relevantSkillContext = lastUserText ? FP.getRelevantSkills(resolved, lastUserText) : '';
   const aiToolSafety: AIToolSafetyContext = {
-    lastUserText: lastUserMsg?.content || '',
-    confirmedTokens: extractAIConfirmedTokens(lastUserMsg?.content || ''),
+    lastUserText,
+    confirmedTokens: extractAIConfirmedTokens(lastUserText),
     controlMode,
   };
-  const directAiOperation = await handleDirectAIOperationCommand(resolved, lastUserMsg?.content || '', aiToolSafety);
+  const directAiOperation = await handleDirectAIOperationCommand(resolved, lastUserText, aiToolSafety);
   if (directAiOperation) return directAiOperation;
 
   /* Inject into system prompt: Five Pillar context + Vault Index + Relevant Files */
@@ -17030,6 +17158,7 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
     if (fpc) sysContent += '\n\n' + fpc;
     if (vaultScan.indexText) sysContent += '\n\n' + vaultScan.indexText;
     if (relevantCtx) sysContent += '\n\n' + relevantCtx;
+    if (relevantSkillContext) sysContent += '\n\n=== RELEVANT LEARNED SKILLS ===\n' + relevantSkillContext;
     // Keep the task contract and Ars-note identity after all retrieved context.
     sysContent += '\n\n' + taskPolicy.systemHint;
     messages = [{ ...messages[0], content: sysContent }, ...messages.slice(1)];
@@ -17038,20 +17167,27 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
   try { FP.consolidateMemory(resolved); } catch {}
   const toolCallsLog: AIToolCallLog[] = [];
   let cur = [...messages]; let ts = true;
+  let lastContextUsage: AIContextWindowUsage = fitAIContextWindow(cur, AI_RUNTIME_CONTEXT_TOKEN_LIMIT).usage;
+  const requestId = options?.requestId?.trim() || crypto.randomUUID();
+  const requestHandle = aiRequestRegistry.begin(event.sender.id, requestId);
   try {
     for (let r = 0; r <= 8; r++) {
+      if (requestHandle.signal.aborted) throw new Error('AI request aborted');
       const url = cfg.provider === 'ollama' ? cfg.baseUrl + '/api/chat' : cfg.baseUrl + '/chat/completions';
       const h: Record<string, string> = { 'Content-Type': 'application/json' };
       if (cfg.apiKey) h['Authorization'] = 'Bearer ' + cfg.apiKey;
-      /* Apply context window management before sending (v0.9.5) */
-      const managedCur = manageContextWindow(cur);
+      /* Apply the same token-aware context budget after retrieval and every tool round. */
+      const managedContext = fitAIContextWindow(cur, AI_RUNTIME_CONTEXT_TOKEN_LIMIT);
+      const managedCur = managedContext.messages;
+      lastContextUsage = managedContext.usage;
       const b = cfg.provider === 'ollama'
         ? JSON.stringify({ model: cfg.model, messages: managedCur, stream: false, ...(ts ? { tools: policyTools } : {}) })
         : JSON.stringify({ model: cfg.model, messages: managedCur, max_tokens: 8192, temperature: 0.55, ...(ts ? { tools: policyTools } : {}) });
       let res: Response;
-      try { res = await fetch(url, { method: 'POST', headers: h, body: b, signal: AbortSignal.timeout(300000) }); }
+      try { res = await fetch(url, { method: 'POST', headers: h, body: b, signal: requestHandle.signal }); }
       catch (fe: any) {
-        if (ts && r === 0) { ts = false; const pb = cfg.provider === 'ollama' ? JSON.stringify({ model: cfg.model, messages: cur, stream: false }) : JSON.stringify({ model: cfg.model, messages: cur, max_tokens: 8192, temperature: 0.55 }); res = await fetch(url, { method: 'POST', headers: h, body: pb, signal: AbortSignal.timeout(300000) }); } else throw fe;
+        if (requestHandle.signal.aborted) throw fe;
+        if (ts && r === 0) { ts = false; const pb = cfg.provider === 'ollama' ? JSON.stringify({ model: cfg.model, messages: managedCur, stream: false }) : JSON.stringify({ model: cfg.model, messages: managedCur, max_tokens: 8192, temperature: 0.55 }); res = await fetch(url, { method: 'POST', headers: h, body: pb, signal: requestHandle.signal }); } else throw fe;
       }
       if (!res.ok) { const et = await res.text().catch(() => ''); const se = et.replace(/Bearer\s+\S+/gi, 'Bearer ***'); return { ok: false, error: 'HTTP ' + res.status + ': ' + se.slice(0, 300), toolCalls: toolCallsLog, createdAt: new Date().toISOString() }; }
       const raw = await res.json(); let ct = ''; let rm = cfg.model; let tc: any[] = [];
@@ -17075,12 +17211,12 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
         /* If user asked for visual content (流程图/思维导图/看板 etc.) but AI just returned text,
            auto-convert the text response into a .canvas file as a bonus */
         if (lastUserMsg && ct && toolCallsLog.length === 0) {
-          if (taskPolicy.primary === 'canvas' && taskPolicy.allowCanvas && shouldAutoCreateCanvasFromPrompt(lastUserMsg.content)) {
+          if (taskPolicy.primary === 'canvas' && taskPolicy.allowCanvas && shouldAutoCreateCanvasFromPrompt(lastUserText)) {
             try {
               const autoCanvas = normalizeAICanvasData(markdownToCanvas(ct));
               if (autoCanvas.nodes.length >= 2) {
                 /* Generate a meaningful file name from user message */
-                const nameHint = lastUserMsg.content.slice(0, 30).replace(/[^\w\u4e00-\u9fff-]/g, '').slice(0, 20) || 'AutoCanvas';
+                const nameHint = lastUserText.slice(0, 30).replace(/[^\w\u4e00-\u9fff-]/g, '').slice(0, 20) || 'AutoCanvas';
                 const cvPath = `01_GDD/${nameHint}.canvas`;
                 const nextContent = JSON.stringify(autoCanvas, null, 2);
                 const quality = analyzeCanvasQuality(autoCanvas);
@@ -17102,13 +17238,14 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
           }
         }
 
-        return { ok: true, content: ct, model: rm, toolCalls: toolCallsLog, createdAt: new Date().toISOString() };
+        return { ok: true, content: ct, model: rm, toolCalls: toolCallsLog, contextUsage: lastContextUsage, createdAt: new Date().toISOString() };
       }
       /* Only push tool-calling assistant msg if not already pushed above (DeepSeek reasoning case) */
       if (!(raw as any).choices?.[0]?.message?.reasoning_content) {
         cur.push({ role: 'assistant', content: ct || "", tool_calls: tc } as any);
       }
       for (const t of tc) {
+        if (requestHandle.signal.aborted) throw new Error('AI request aborted');
         const fn = t.function?.name; let fa: Record<string, string>;
         try { const a = t.function?.arguments || '{}'; fa = typeof a === 'string' ? JSON.parse(a) : a; } catch { fa = {}; }
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ai:tool-progress', { name: fn, args: fa, status: 'running' });
@@ -17129,10 +17266,23 @@ ipcMain.handle('ai:sendChat', async (_e, vaultPath: string, messages: Array<{ ro
         const tm: any = { role: 'tool', content: result }; if (t.id) tm.tool_call_id = t.id; cur.push(tm);
       }
     }
-    return { ok: true, content: 'Tool execution completed.', toolCalls: toolCallsLog, createdAt: new Date().toISOString() };
+    return { ok: true, content: 'Tool execution completed.', toolCalls: toolCallsLog, contextUsage: lastContextUsage, createdAt: new Date().toISOString() };
   } catch (err: any) {
-    return { ok: false, error: (err.message || 'Request failed').replace(/Bearer\s+\S+/gi, 'Bearer ***'), toolCalls: toolCallsLog, createdAt: new Date().toISOString() };
+    const abortReason = requestHandle.getAbortReason();
+    return {
+      ok: false,
+      cancelled: abortReason === 'cancelled',
+      timedOut: abortReason === 'timeout',
+      error: abortReason === 'cancelled'
+        ? 'AI request cancelled'
+        : abortReason === 'timeout'
+          ? 'AI request timed out'
+          : (err.message || 'Request failed').replace(/Bearer\s+\S+/gi, 'Bearer ***'),
+      toolCalls: toolCallsLog,
+      createdAt: new Date().toISOString(),
+    };
   } finally {
+    requestHandle.dispose();
     try { FP.saveConversation(resolved, cur); } catch {}
     if (toolCallsLog.length > 0) try {
       const um = messages.find((m: any) => m.role === 'user');
