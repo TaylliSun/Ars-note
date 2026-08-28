@@ -112,6 +112,7 @@ const MIN_CARD_W = 120;
 const MIN_CARD_H = 60;
 const GRID_SIZE = 20;
 const MIN_ZOOM = 0.1;
+const MIN_READABLE_MINDMAP_ZOOM = 0.72;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.15;
 const CANVAS_LAYOUT_VERSION = 3;
@@ -810,6 +811,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   const [mindMapOutlineOpen, setMindMapOutlineOpen] = useState(false);
   const [mindMapSearchOpen, setMindMapSearchOpen] = useState(false);
   const [mindMapHelpOpen, setMindMapHelpOpen] = useState(false);
+  const [mindMapMoreOpen, setMindMapMoreOpen] = useState(false);
   const [mindMapSearchQuery, setMindMapSearchQuery] = useState('');
   const [mindMapSearchIndex, setMindMapSearchIndex] = useState(0);
   const [mindMapNotice, setMindMapNotice] = useState('');
@@ -857,6 +859,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   const mindMapDragTargetsRef = useRef<CanvasNode[]>([]);
   const lastMindMapAutoFitKeyRef = useRef('');
   const mindMapSearchInputRef = useRef<HTMLInputElement>(null);
+  const mindMapMoreRef = useRef<HTMLDivElement>(null);
   const mindMapNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* Keep refs in sync */
@@ -1852,7 +1855,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     selectedEdgeRef.current = null;
   }, [saveCanvas]);
 
-  const fitToContent = useCallback(() => {
+  const fitToContent = useCallback((preferReadableScale = false) => {
     const visibleIds = canvasModeRef.current === 'mindmap'
       ? getMindMapVisibleNodeIds(nodesRef.current, edgesRef.current)
       : null;
@@ -1877,7 +1880,11 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     if (!rect) return;
     const contentW = maxX - minX + padding * 2;
     const contentH = maxY - minY + padding * 2;
-    const newZoom = Math.max(MIN_ZOOM, Math.min(2, Math.min(rect.width / contentW, rect.height / contentH)));
+    const fitZoom = Math.min(2, Math.min(rect.width / contentW, rect.height / contentH));
+    const zoomFloor = preferReadableScale && canvasModeRef.current === 'mindmap'
+      ? MIN_READABLE_MINDMAP_ZOOM
+      : MIN_ZOOM;
+    const newZoom = Math.max(zoomFloor, fitZoom);
     const newPan = {
       x: (rect.width - contentW * newZoom) / 2 - (minX - padding) * newZoom,
       y: (rect.height - contentH * newZoom) / 2 - (minY - padding) * newZoom,
@@ -1931,7 +1938,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     const key = `${fileName || 'canvas'}:${canvasMode}`;
     if (lastMindMapAutoFitKeyRef.current === key) return;
     lastMindMapAutoFitKeyRef.current = key;
-    const frame = requestAnimationFrame(() => fitToContent());
+    const frame = requestAnimationFrame(() => fitToContent(true));
     return () => cancelAnimationFrame(frame);
   }, [canvasMode, fileName, fitToContent, nodes.length]);
 
@@ -2302,6 +2309,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
 
   const changeCanvasMode = useCallback((nextMode: MindMapCanvasMode) => {
     if (canvasModeRef.current === nextMode) return;
+    setMindMapMoreOpen(false);
     const historySnapshot = makeSnapshot();
     canvasModeRef.current = nextMode;
     setCanvasMode(nextMode);
@@ -2340,6 +2348,22 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     setMindMapSearchOpen(false);
     setMindMapSearchIndex(0);
   }, []);
+
+  useEffect(() => {
+    if (!mindMapMoreOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!mindMapMoreRef.current?.contains(event.target as Node)) setMindMapMoreOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMindMapMoreOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [mindMapMoreOpen]);
 
   /* ── Keyboard shortcuts ── */
   useEffect(() => {
@@ -2661,13 +2685,10 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
 
       {/* Toolbar */}
       <div className="canvas-toolbar">
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Undo (Ctrl+Z)" onClick={undoCanvas} disabled={!canUndo}>
-          Undo
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Redo (Ctrl+Y)" onClick={redoCanvas} disabled={!canRedo}>
-          Redo
-        </button>
-        <div className="canvas-tool-sep" />
+        <div className="canvas-toolbar-group canvas-toolbar-history" role="toolbar" aria-label="撤销与重做">
+          <button className="canvas-tool-btn canvas-tool-icon-btn" title="撤销 (Ctrl+Z)" aria-label="撤销" onClick={undoCanvas} disabled={!canUndo}>↶</button>
+          <button className="canvas-tool-btn canvas-tool-icon-btn" title="重做 (Ctrl+Y)" aria-label="重做" onClick={redoCanvas} disabled={!canRedo}>↷</button>
+        </div>
         <div className="canvas-mode-switch" role="tablist" aria-label="画布模式">
           <button type="button" role="tab" aria-selected={canvasMode === 'free'} className={canvasMode === 'free' ? 'active' : ''} onClick={() => changeCanvasMode('free')}>
             自由画布
@@ -2676,131 +2697,116 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
             思维导图
           </button>
         </div>
-        <div className="canvas-tool-sep" />
-        {canvasMode === 'mindmap' ? (
-          <>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加子主题 (Tab)" onClick={() => addMindMapNode('child')}>
-              + 子主题
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加同级主题 (Enter)" onClick={() => addMindMapNode('sibling')}>
-              + 同级
-            </button>
+        <div className="canvas-toolbar-actions" role="toolbar" aria-label={canvasMode === 'mindmap' ? '思维导图操作' : '自由画布操作'}>
+          {canvasMode === 'mindmap' ? (
+            <>
+              <div className="canvas-toolbar-group canvas-toolbar-create">
+                <button className="canvas-tool-btn canvas-tool-btn-wide canvas-tool-btn-primary" title="添加子主题 (Tab)" onClick={() => addMindMapNode('child')}>+ 子主题</button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加同级主题 (Enter)" onClick={() => addMindMapNode('sibling')}>+ 同级</button>
+              </div>
+              <div className="canvas-toolbar-group">
+                <button
+                  className="canvas-tool-btn canvas-tool-btn-wide"
+                  title="折叠或展开当前分支 (Space)"
+                  onClick={() => toggleMindMapBranch(selectedRef.current)}
+                  disabled={!selectedNode || (mindMapIndexData?.childrenById.get(selectedNode.id)?.length || 0) === 0}
+                >
+                  {selectedNode?.collapsed ? '展开' : '折叠'}
+                </button>
+                <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapOutlineOpen ? ' active' : ''}`} title="打开或关闭导图大纲" onClick={() => setMindMapOutlineOpen((open) => !open)}>大纲</button>
+                <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapSearchOpen ? ' active' : ''}`} title="搜索主题 (Ctrl+F)" onClick={openMindMapSearch}>搜索</button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="一键整理导图" onClick={autoLayoutCanvas} disabled={nodes.length === 0}>整理</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="canvas-toolbar-group canvas-toolbar-create">
+                <button className="canvas-tool-btn" title="添加文本卡片（双击空白处）" onClick={addTextCard}><span style={{ fontSize: 16, lineHeight: 1 }}>+</span></button>
+                <button className="canvas-tool-btn" title="添加文件卡片" onClick={addFileCard}><span style={{ fontSize: 13 }}>F</span></button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加分组框" onClick={addGroupCard}>分组</button>
+              </div>
+              <div className="canvas-toolbar-group">
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="Duplicate selected cards (Ctrl+D)" onClick={duplicateSelectedNodes} disabled={!selected}>Duplicate</button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="Delete selection" onClick={() => selectedEdge ? deleteSelectedEdge() : deleteSelectedNodes()} disabled={!selected && !selectedEdge}>Delete</button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="自动排列卡片" onClick={autoLayoutCanvas} disabled={nodes.length === 0}>布局</button>
+                <button
+                  className={`canvas-quality-chip canvas-quality-${canvasQuality.level}`}
+                  title={canvasQuality.tooltip}
+                  onClick={() => setQualityPanelOpen(open => !open)}
+                  disabled={nodes.length === 0}
+                  aria-expanded={qualityPanelOpen}
+                  aria-controls="canvas-quality-panel"
+                >
+                  <span className="canvas-quality-dot" />
+                  <span>Quality {canvasQuality.score}</span>
+                  {canvasQuality.issueCount > 0 && <span className="canvas-quality-issues">{canvasQuality.issueCount}</span>}
+                </button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="Fit selected text card" onClick={() => fitTextNodeToContent(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>Fit</button>
+                <button className="canvas-tool-btn canvas-tool-btn-wide" title="Split selected long text card" onClick={() => splitTextNodeIntoReadableCards(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>Split</button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {canvasMode === 'mindmap' && (
+          <div className="canvas-more-menu" ref={mindMapMoreRef}>
             <button
-              className="canvas-tool-btn canvas-tool-btn-wide"
-              title="折叠或展开当前分支 (Space)"
-              onClick={() => toggleMindMapBranch(selectedRef.current)}
-              disabled={!selectedNode || (mindMapIndexData?.childrenById.get(selectedNode.id)?.length || 0) === 0}
-            >
-              {selectedNode?.collapsed ? '展开' : '折叠'}
-            </button>
-            <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapOutlineOpen ? ' active' : ''}`} title="打开或关闭导图大纲" onClick={() => setMindMapOutlineOpen((open) => !open)}>
-              大纲
-            </button>
-            <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapSearchOpen ? ' active' : ''}`} title="搜索主题 (Ctrl+F)" onClick={openMindMapSearch}>
-              搜索
-            </button>
-            <button
-              className={`canvas-tool-btn${mindMapHelpOpen ? ' active' : ''}`}
-              title="思维导图快捷键"
-              aria-label="打开思维导图快捷键帮助"
-              aria-expanded={mindMapHelpOpen}
-              onClick={() => {
-                setMindMapSearchOpen(false);
-                setMindMapHelpOpen((open) => !open);
-              }}
-            >?</button>
-          </>
-        ) : (
-          <>
-            <button className="canvas-tool-btn" title="添加文本卡片（双击空白处）" onClick={addTextCard}>
-              <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
-            </button>
-            <button className="canvas-tool-btn" title="添加文件卡片" onClick={addFileCard}>
-              <span style={{ fontSize: 13 }}>F</span>
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加分组框" onClick={addGroupCard}>
-              分组
-            </button>
-          </>
+              type="button"
+              className={`canvas-tool-btn canvas-tool-icon-btn${mindMapMoreOpen ? ' active' : ''}`}
+              title="更多导图操作"
+              aria-label="更多导图操作"
+              aria-expanded={mindMapMoreOpen}
+              onClick={() => setMindMapMoreOpen((open) => !open)}
+            >•••</button>
+            {mindMapMoreOpen && (
+              <div className="canvas-more-popover" role="menu" aria-label="更多导图操作">
+                <button type="button" role="menuitem" aria-label="复制整个分支" onClick={() => { void copyMindMapBranch(false); setMindMapMoreOpen(false); }} disabled={!selected}>
+                  <span>复制整个分支</span><kbd>Ctrl C</kbd>
+                </button>
+                <button type="button" role="menuitem" aria-label="粘贴为子分支" onClick={() => { void pasteMindMapBranch(); setMindMapMoreOpen(false); }} disabled={nodes.length === 0}>
+                  <span>粘贴为子分支</span><kbd>Ctrl V</kbd>
+                </button>
+                <button type="button" role="menuitem" aria-label="同级上移" onClick={() => { reorderMindMapSibling(-1); setMindMapMoreOpen(false); }} disabled={!selected}>
+                  <span>同级上移</span><kbd>Alt ↑</kbd>
+                </button>
+                <button type="button" role="menuitem" aria-label="同级下移" onClick={() => { reorderMindMapSibling(1); setMindMapMoreOpen(false); }} disabled={!selected}>
+                  <span>同级下移</span><kbd>Alt ↓</kbd>
+                </button>
+                <div className="canvas-more-divider" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-label="快捷键帮助"
+                  onClick={() => {
+                    setMindMapMoreOpen(false);
+                    setMindMapSearchOpen(false);
+                    setMindMapHelpOpen((open) => !open);
+                  }}
+                >
+                  <span>快捷键帮助</span><kbd>?</kbd>
+                </button>
+                <button type="button" role="menuitem" aria-label="删除整个分支" className="danger" onClick={() => { deleteMindMapBranch(); setMindMapMoreOpen(false); }} disabled={!selected}>
+                  <span>删除整个分支</span><kbd>Del</kbd>
+                </button>
+              </div>
+            )}
+          </div>
         )}
-        {canvasMode === 'mindmap' ? (
-          <>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="复制整个分支 (Ctrl+C)" onClick={() => void copyMindMapBranch(false)} disabled={!selected}>
-              复制
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="粘贴为当前主题的子分支 (Ctrl+V)" onClick={() => void pasteMindMapBranch()} disabled={nodes.length === 0}>
-              粘贴
-            </button>
-            <button className="canvas-tool-btn" title="同级上移 (Alt+↑)" onClick={() => reorderMindMapSibling(-1)} disabled={!selected} aria-label="同级上移">↑</button>
-            <button className="canvas-tool-btn" title="同级下移 (Alt+↓)" onClick={() => reorderMindMapSibling(1)} disabled={!selected} aria-label="同级下移">↓</button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="删除整个分支 (Delete)" onClick={() => deleteMindMapBranch()} disabled={!selected}>
-              删除
-            </button>
-          </>
-        ) : (
-          <>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Duplicate selected cards (Ctrl+D)" onClick={duplicateSelectedNodes} disabled={!selected}>
-              Duplicate
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Delete selection" onClick={() => selectedEdge ? deleteSelectedEdge() : deleteSelectedNodes()} disabled={!selected && !selectedEdge}>
-              Delete
-            </button>
-          </>
-        )}
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title={canvasMode === 'mindmap' ? '一键整理导图' : '自动排列卡片'} onClick={autoLayoutCanvas} disabled={nodes.length === 0}>
-          {canvasMode === 'mindmap' ? '整理' : '布局'}
-        </button>
-        {canvasMode === 'free' && (
-          <>
-            <button
-              className={`canvas-quality-chip canvas-quality-${canvasQuality.level}`}
-              title={canvasQuality.tooltip}
-              onClick={() => setQualityPanelOpen(open => !open)}
-              disabled={nodes.length === 0}
-              aria-expanded={qualityPanelOpen}
-              aria-controls="canvas-quality-panel"
-            >
-              <span className="canvas-quality-dot" />
-              <span>Quality {canvasQuality.score}</span>
-              {canvasQuality.issueCount > 0 && <span className="canvas-quality-issues">{canvasQuality.issueCount}</span>}
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Fit selected text card" onClick={() => fitTextNodeToContent(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
-              Fit
-            </button>
-            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Split selected long text card" onClick={() => splitTextNodeIntoReadableCards(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
-              Split
-            </button>
-          </>
-        )}
-        <div className="canvas-tool-sep" />
-        <button className="canvas-tool-btn" title="缩小" onClick={() => {
-          const z = Math.max(MIN_ZOOM, zoomRef.current * (1 - ZOOM_STEP));
-          setZoom(z); zoomRef.current = z;
-          applyTransform();
-        }}>
-          <span style={{ fontSize: 13 }}>−</span>
-        </button>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 40, textAlign: 'center', cursor: 'pointer' }}
-          onClick={fitToContent}
-          title="适应视图">
-          {Math.round(zoom * 100)}%
-        </span>
-        <button className="canvas-tool-btn" title="放大" onClick={() => {
-          const z = Math.min(MAX_ZOOM, zoomRef.current * (1 + ZOOM_STEP));
-          setZoom(z); zoomRef.current = z;
-          applyTransform();
-        }}>
-          <span style={{ fontSize: 13 }}>+</span>
-        </button>
-        <button className="canvas-tool-btn" title="适应内容" onClick={fitToContent}>
-          <span style={{ fontSize: 11 }}>⊞</span>
-        </button>
-        <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {canvasMode === 'mindmap'
-            ? '方向键导航 · Tab 子主题 · Enter 同级 · Shift+Tab 提升 · Esc 取消编辑'
-            : '双击创建 · 滚轮平移 · Ctrl+滚轮缩放 · Alt 拖动画布'}
-        </span>
+
+        <div className="canvas-zoom-control" role="toolbar" aria-label="画布缩放">
+          <button className="canvas-tool-btn canvas-tool-icon-btn" title="缩小" aria-label="缩小" onClick={() => {
+            const z = Math.max(MIN_ZOOM, zoomRef.current * (1 - ZOOM_STEP));
+            setZoom(z); zoomRef.current = z;
+            applyTransform();
+          }}>−</button>
+          <button className="canvas-zoom-value" type="button" onClick={() => fitToContent()} title="适应全部内容">{Math.round(zoom * 100)}%</button>
+          <button className="canvas-tool-btn canvas-tool-icon-btn" title="放大" aria-label="放大" onClick={() => {
+            const z = Math.min(MAX_ZOOM, zoomRef.current * (1 + ZOOM_STEP));
+            setZoom(z); zoomRef.current = z;
+            applyTransform();
+          }}>+</button>
+          <button className="canvas-tool-btn canvas-tool-icon-btn canvas-fit-button" title="适应全部内容" aria-label="适应全部内容" onClick={() => fitToContent()}>⊞</button>
+        </div>
       </div>
 
       {canvasMode === 'mindmap' && mindMapSearchOpen && (
@@ -2929,8 +2935,9 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         </div>
       )}
 
-      {canvasMode === 'mindmap' && mindMapOutlineOpen && (
-        <aside className="canvas-mindmap-outline" aria-label="思维导图大纲">
+      <div className={`canvas-stage${canvasMode === 'mindmap' && mindMapOutlineOpen ? ' outline-open' : ''}`}>
+        {canvasMode === 'mindmap' && mindMapOutlineOpen && (
+          <aside className="canvas-mindmap-outline" aria-label="思维导图大纲">
           <div className="canvas-mindmap-outline-head">
             <div>
               <span>导图大纲</span>
@@ -2963,21 +2970,21 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
               );
             })}
           </div>
-        </aside>
-      )}
+          </aside>
+        )}
 
-      {/* Canvas viewport */}
-      <div
-        ref={viewportRef}
-        className="canvas-viewport"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        onWheel={handleWheel}
-        onDoubleClick={handleDoubleClick}
-        onContextMenu={(e) => openContextMenu(e, null)}
-      >
+        {/* Canvas viewport */}
+        <div
+          ref={viewportRef}
+          className="canvas-viewport"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onWheel={handleWheel}
+          onDoubleClick={handleDoubleClick}
+          onContextMenu={(e) => openContextMenu(e, null)}
+        >
         <div
           ref={contentRef}
           className="canvas-content"
@@ -3245,6 +3252,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
               ))}
             </div>
           )}
+        </div>
         </div>
       </div>
 

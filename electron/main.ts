@@ -77,7 +77,7 @@ const DOWNLOADS_DIR = 'downloads';
 const VAULT_CONFIG_FILE = 'vault.json';
 const SETTINGS_FILE = 'settings.json';
 const APP_VERSION = (() => {
-  try { return app.getVersion() || '1.5.97'; } catch { return '1.5.97'; }
+  try { return app.getVersion() || '1.5.98'; } catch { return '1.5.98'; }
 })();
 const LIVE_SYNC_CONFIG_FILE = path.join(app.getPath('userData'), 'live-sync-configs.json');
 const AI_RUNTIME_CONFIG_FILE = path.join(app.getPath('userData'), 'ai-runtime-configs.json');

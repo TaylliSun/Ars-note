@@ -819,6 +819,15 @@ async function run() {
         && !document.querySelector('.document-opening-overlay')
       )`), 20_000);
 
+      await cdp.evaluate(`([...document.querySelectorAll('.canvas-toolbar button')].find((button) => (button.title || '').includes('导图大纲')))?.click(); true`);
+      await waitFor('docked mind map outline', () => cdp.evaluate(`(() => {
+        const outline = document.querySelector('.canvas-mindmap-outline');
+        const viewport = document.querySelector('.canvas-viewport');
+        if (!(outline instanceof HTMLElement) || !(viewport instanceof HTMLElement)) return false;
+        if (window.innerWidth <= 1100) return true;
+        return outline.getBoundingClientRect().right <= viewport.getBoundingClientRect().left + 1;
+      })()`));
+
       const alphaPoint = await cdp.evaluate(`(() => {
         const card = [...document.querySelectorAll('.canvas-card.mindmap-card')]
           .find((element) => element.getAttribute('aria-label') === 'Alpha branch');
@@ -866,7 +875,9 @@ async function run() {
       })()`);
       if (!selectedAlphaAgain) throw new Error('Mind map branch disappeared after adding a child');
       await cdp.evaluate(`document.querySelector('.canvas-card[aria-label="Alpha branch"]')?.dispatchEvent(new FocusEvent('focus', { bubbles: true })); true`);
-      await cdp.evaluate(`document.querySelector('.canvas-toolbar button[aria-label="同级下移"]')?.click(); true`);
+      await cdp.evaluate(`document.querySelector('.canvas-toolbar button[aria-label="更多导图操作"]')?.click(); true`);
+      await waitFor('mind map more menu', () => cdp.evaluate(`Boolean(document.querySelector('.canvas-more-popover[role="menu"]'))`));
+      await cdp.evaluate(`document.querySelector('.canvas-more-popover button[aria-label="同级下移"]')?.click(); true`);
       await waitFor('mind map sibling reorder', () => cdp.evaluate(`window.arsnote.readFile(${JSON.stringify(canvasPath)}).then((text) => {
         const data = JSON.parse(text);
         return data.edges.findIndex((edge) => edge.id === 'root-c') < data.edges.findIndex((edge) => edge.id === 'root-a');

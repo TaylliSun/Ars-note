@@ -498,20 +498,50 @@ html, body, #root {
 .canvas-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
+  gap: 8px;
+  min-height: 48px;
+  padding: 7px 12px;
+  position: relative;
+  z-index: 48;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 92%, white 4%), color-mix(in srgb, var(--bg-panel) 96%, black 8%));
   border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 7%, transparent);
   flex-shrink: 0;
+  overflow: visible;
+}
+
+.canvas-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
 }
 
-.canvas-toolbar::-webkit-scrollbar {
+.canvas-toolbar-actions::-webkit-scrollbar {
   display: none;
+}
+
+.canvas-toolbar-group,
+.canvas-zoom-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-main) 68%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 4%, transparent);
+}
+
+.canvas-toolbar-create {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
 }
 
 .canvas-mode-switch {
@@ -554,62 +584,165 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 28px;
-  height: 28px;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 10px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 92%, white 5%), color-mix(in srgb, var(--bg-card) 94%, black 8%));
-  color: var(--text-main);
+  height: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
-  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+  box-shadow: none;
+  transition: color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
 }
 .canvas-tool-btn:hover {
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--accent) 18%, var(--bg-card)), color-mix(in srgb, var(--accent) 10%, var(--bg-card)));
-  border-color: color-mix(in srgb, var(--accent) 74%, var(--border));
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 18%, transparent);
-  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--text-main);
 }
 .canvas-tool-btn:active {
-  transform: scale(0.92);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .canvas-tool-btn.active {
-  border-color: color-mix(in srgb, var(--accent) 64%, var(--border));
   background: color-mix(in srgb, var(--accent) 18%, var(--bg-card));
-  color: color-mix(in srgb, var(--accent) 72%, var(--text-main));
+  color: color-mix(in srgb, var(--accent) 76%, var(--text-main));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 .canvas-tool-btn-wide {
   width: auto;
-  min-width: 62px;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
+  min-width: 0;
+  padding: 0 9px;
+}
+.canvas-tool-icon-btn {
+  font-size: 16px;
+  font-weight: 650;
+}
+.canvas-tool-btn-primary {
+  padding-inline: 11px;
+  background: color-mix(in srgb, var(--accent) 84%, var(--bg-card));
+  color: white;
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.canvas-tool-btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 94%, white 6%);
+  color: white;
 }
 .canvas-tool-btn:disabled {
-  opacity: 0.42;
+  opacity: 0.38;
   cursor: not-allowed;
   box-shadow: none;
-  transform: none;
 }
 .canvas-tool-btn:disabled:hover {
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 92%, white 5%), color-mix(in srgb, var(--bg-card) 94%, black 8%));
-  border-color: color-mix(in srgb, var(--border) 78%, transparent);
-}
-.canvas-toolbar-hint {
+  background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+}
+
+.canvas-more-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.canvas-more-menu > .canvas-tool-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-main) 68%, transparent);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+.canvas-more-menu > .canvas-tool-btn:hover,
+.canvas-more-menu > .canvas-tool-btn.active {
+  background: color-mix(in srgb, var(--accent) 15%, var(--bg-card));
+}
+
+.canvas-more-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  width: 224px;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-panel) 96%, transparent);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.canvas-more-popover > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.canvas-more-popover > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--text-main);
+}
+
+.canvas-more-popover > button.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, #ef4444 13%, transparent);
+  color: #ff7b86;
+}
+
+.canvas-more-popover > button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.canvas-more-popover kbd {
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
   white-space: nowrap;
 }
 
-.canvas-tool-sep {
-  width: 1px;
-  height: 18px;
-  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--border) 82%, transparent), transparent);
-  margin: 0 6px;
+.canvas-more-divider {
+  height: 1px;
+  margin: 5px 6px;
+  background: color-mix(in srgb, var(--border) 74%, transparent);
+}
+
+.canvas-zoom-control {
+  gap: 1px;
+}
+
+.canvas-zoom-value {
+  min-width: 42px;
+  height: 26px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.canvas-zoom-value:hover {
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: var(--text-main);
 }
 
 .canvas-quality-chip {
@@ -853,8 +986,19 @@ html, body, #root {
   border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
 }
 
+.canvas-stage {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
 .canvas-viewport {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   position: relative;
   overflow: hidden;
   cursor: default;
@@ -1977,20 +2121,24 @@ html, body, #root {
 }
 
 .canvas-mindmap-outline {
-  position: absolute;
-  top: 96px;
-  left: 16px;
-  bottom: 20px;
+  position: relative;
   z-index: 35;
   display: flex;
   flex-direction: column;
-  width: min(290px, calc(100% - 32px));
+  flex: 0 0 clamp(232px, 22vw, 284px);
+  width: auto;
+  min-width: 0;
+  margin: 12px 0 12px 12px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 14px;
   background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
   backdrop-filter: blur(18px);
+}
+
+.canvas-stage.outline-open {
+  gap: 12px;
 }
 
 .canvas-mindmap-outline-head {
@@ -2094,6 +2242,48 @@ html, body, #root {
 .canvas-mindmap-outline-mark:disabled {
   color: var(--text-muted);
   cursor: default;
+}
+
+@media (max-width: 1100px) {
+  .canvas-toolbar {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .canvas-mode-switch button {
+    padding-inline: 8px;
+  }
+
+  .canvas-stage.outline-open {
+    gap: 0;
+  }
+
+  .canvas-mindmap-outline {
+    position: absolute;
+    inset: 10px auto 10px 10px;
+    width: min(272px, calc(100% - 20px));
+    margin: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .canvas-toolbar-history,
+  .canvas-fit-button {
+    display: none;
+  }
+
+  .canvas-mode-switch button {
+    padding-inline: 7px;
+    font-size: 10px;
+  }
+
+  .canvas-toolbar-actions {
+    gap: 5px;
+  }
+
+  .canvas-zoom-value {
+    min-width: 36px;
+  }
 }
 
 .document-opening-overlay {

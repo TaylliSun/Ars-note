@@ -52,7 +52,7 @@ Ars-note 是面向游戏开发团队的本地优先 Markdown 工作台，提供�
 
 ## 安装
 
-1. 下载 `Ars-note-Setup-1.5.97.exe`。
+1. 下载 `Ars-note-Setup-1.5.98.exe`。
 2. 校验发布页提供的 SHA256。
 3. 运行安装程序并选择安装目录。
 4. 首次启动后创建或打开一个 Vault。
@@ -102,7 +102,7 @@ npm run release:full
 
 ## 发布状态
 
-`v1.5.97` 是当前公开测试版。Windows 安装包暂未进行 Authenticode 签名，因此首次下载运行时可能出现 SmartScreen 提示。重要项目请继续保留独立备份，并在升级同步服务器前备份 `sync-data`。
+`v1.5.98` 是当前公开测试版。Windows 安装包暂未进行 Authenticode 签名，因此首次下载运行时可能出现 SmartScreen 提示。重要项目请继续保留独立备份，并在升级同步服务器前备份 `sync-data`。
 
 ## 许可证
 
