@@ -43,3 +43,15 @@ test('English core-loop template covers progression, recovery, telemetry, and re
   assert.match(template.content, /Traceability/);
   assert.match(template.content, /Passed.*Needs review.*Blocked/s);
 });
+
+test('GDD template is organized as a causal design document rather than a feature inventory', () => {
+  const template = getTemplateById('gdd', {}, 'zh-CN');
+  assert.ok(template);
+  assert.match(template.content, /## 2\. 多层体验循环/);
+  assert.match(template.content, /## 3\. 核心玩法循环/);
+  assert.match(template.content, /消耗 \/ 投入 \/ 转化/);
+  assert.match(template.content, /下一轮改变的决策/);
+  assert.match(template.content, /## 4\. 系统关系与依赖/);
+  assert.match(template.content, /战斗、采集、建造、探索、对话和经营只是行动或子系统/);
+  assert.match(template.content, /最小可玩原型/);
+});

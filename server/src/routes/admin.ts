@@ -18,6 +18,7 @@ export interface AdminOverviewOptions {
   startedAt: string;
   apiKeyConfigured: boolean;
   devMode: boolean;
+  security: Record<string, unknown>;
 }
 
 interface AdminClientSummary {
@@ -526,7 +527,7 @@ function normalizeAiMemoryManifestPath(item: unknown): string {
 }
 
 const CORE_TEAM_PRODUCTION_DOCS: Array<{ key: string; label: string; relativePath: string }> = [
-  { key: 'commandCenter', label: 'Obsidian 控制台', relativePath: '.ars-team/obsidian-command-center.md' },
+  { key: 'commandCenter', label: 'Ars-note 制作台', relativePath: '.ars-team/team-command-center.md' },
   { key: 'dashboard', label: '团队首页', relativePath: '.ars-team/team-dashboard.md' },
   { key: 'productionHealth', label: '生产健康报告', relativePath: '.ars-team/production-health.md' },
   { key: 'aiHandoff', label: 'AI 交接页', relativePath: '.ars-team/ai-handoff.md' },
@@ -1007,6 +1008,7 @@ export async function handleAdminOverview(
     uptimeSeconds: number;
     apiKeyConfigured: boolean;
     devMode: boolean;
+    security: Record<string, unknown>;
     totalConnections: number;
     knownClients: number;
     activeVaults: number;
@@ -1140,6 +1142,21 @@ export async function handleAdminOverview(
     ? await storage.listServerDataSnapshots(10).catch(() => [])
     : [];
   const duplicateVaultGroups = buildDuplicateVaultGroups(summaries, capabilities);
+  const warnings = buildWarnings(summaries, capabilities);
+  if (!options.apiKeyConfigured) {
+    warnings.unshift({
+      level: 'danger',
+      title: '同步服务器未启用身份认证',
+      message: '不要将当前端口暴露到局域网或公网。请配置随机 API Key 后重启服务。',
+    });
+  }
+  if (options.security?.mode !== 'public' && !['127.0.0.1', 'localhost', '::1'].includes(options.host)) {
+    warnings.unshift({
+      level: 'warning',
+      title: '当前服务器处于 LAN MODE',
+      message: 'LAN MODE 不会强制 HTTPS。若准备通过公网访问，请改用 docker-compose.public.yml 和 HTTPS/WSS 反向代理。',
+    });
+  }
 
   return {
     ok: true,
@@ -1154,6 +1171,7 @@ export async function handleAdminOverview(
       uptimeSeconds: Math.floor(process.uptime()),
       apiKeyConfigured: options.apiKeyConfigured,
       devMode: options.devMode,
+      security: options.security,
       totalConnections: getTotalConnections(),
       knownClients: summaries.reduce((sum, item) => sum + item.clientHistory.length, 0),
       activeVaults: getActiveVaultCount(),
@@ -1168,7 +1186,7 @@ export async function handleAdminOverview(
       liveTotalSize: summaries.reduce((sum, item) => sum + (item.live?.totalSize || 0), 0),
     },
     capabilities,
-    warnings: buildWarnings(summaries, capabilities),
+    warnings,
     duplicateVaultGroups,
     serverDataSnapshots,
     vaults: summaries,
@@ -2849,6 +2867,7 @@ export function renderAdminPage(): string {
       text('serverStarted', fmtDate(data.server.startedAt));
       $('serverPills').innerHTML = [
         '<span class="pill ' + (data.server.apiKeyConfigured ? 'ok' : 'warn') + '">' + (data.server.apiKeyConfigured ? 'API Key 已启用' : '开发模式') + '</span>',
+        '<span class="pill ' + (data.server.security && data.server.security.httpsRequired ? 'ok' : 'warn') + '">' + (data.server.security && data.server.security.mode === 'public' ? 'PUBLIC HTTPS' : 'LAN MODE') + '</span>',
         '<span class="pill">备份 ' + fmtBytes(data.totals.backupTotalSize) + '</span>',
         '<span class="pill">实时 ' + fmtBytes(data.totals.liveTotalSize) + '</span>'
       ].join(' ');

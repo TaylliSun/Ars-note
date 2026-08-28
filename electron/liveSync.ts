@@ -67,6 +67,40 @@ export function normalizeLiveSyncServerUrl(serverUrl: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
+function isPrivateOrOverlayHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host === '::1' || host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home') || host.endsWith('.internal') || host.endsWith('.ts.net')) return true;
+  if (!host.includes('.')) return true;
+
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) {
+    const parts = ipv4.slice(1).map(Number);
+    if (parts.some((part) => part < 0 || part > 255)) return false;
+    return parts[0] === 10
+      || parts[0] === 127
+      || (parts[0] === 169 && parts[1] === 254)
+      || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+      || (parts[0] === 192 && parts[1] === 168)
+      || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127);
+  }
+
+  if (host.includes(':')) {
+    return host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb');
+  }
+  return false;
+}
+
+export function getInsecurePublicLiveSyncReason(serverUrl: string): string {
+  try {
+    const normalized = normalizeLiveSyncServerUrl(serverUrl);
+    const url = new URL(normalized);
+    if (url.protocol === 'https:' || isPrivateOrOverlayHost(url.hostname)) return '';
+    return '公网同步地址必须使用 https://（WebSocket 会自动使用 wss://）。明文 HTTP 会泄露同步密钥和 Vault 内容。';
+  } catch {
+    return '同步服务器地址无效。';
+  }
+}
+
 interface LiveSyncState {
   connected: boolean;
   clientId: string;
@@ -245,6 +279,11 @@ const REQUIRED_SERVER_SAFETY_CAPABILITIES = [
   'serializedVaultWrites',
   'startupStorageReadiness',
   'metadataOnlySnapshots',
+  'constantTimeAuthentication',
+  'authFailureRateLimit',
+  'apiKeyHeaderOnly',
+  'httpSecurityHeaders',
+  'webSocketProtocolValidation',
 ] as const;
 const SERVER_SAFETY_CAPABILITY_LABELS: Record<(typeof REQUIRED_SERVER_SAFETY_CAPABILITIES)[number], string> = {
   livePersistence: 'server live-file snapshots',
@@ -266,6 +305,11 @@ const SERVER_SAFETY_CAPABILITY_LABELS: Record<(typeof REQUIRED_SERVER_SAFETY_CAP
   serializedVaultWrites: 'serialized per-Vault writes',
   startupStorageReadiness: 'storage-ready startup gate',
   metadataOnlySnapshots: 'metadata-only reconnect snapshots',
+  constantTimeAuthentication: 'constant-time API key authentication',
+  authFailureRateLimit: 'authentication failure rate limit',
+  apiKeyHeaderOnly: 'header-only WebSocket credentials',
+  httpSecurityHeaders: 'HTTP security headers',
+  webSocketProtocolValidation: 'WebSocket protocol validation',
 };
 
 interface DeleteShadowSnapshot {
@@ -660,6 +704,17 @@ export function startLiveSync(
 
   const serverUrl = normalizeLiveSyncServerUrl(config.serverUrl);
   if (!serverUrl) return;
+  const insecurePublicReason = getInsecurePublicLiveSyncReason(serverUrl);
+  if (insecurePublicReason && process.env.ARS_NOTE_ALLOW_INSECURE_PUBLIC_SYNC !== '1') {
+    sendToRenderer('live-sync:status', {
+      connected: false,
+      error: insecurePublicReason,
+      serverUrl,
+      vaultId: config.vaultId || '',
+      connectedAt: null,
+    });
+    return;
+  }
 
   const vaultId = getStableVaultId(vaultPath, config);
   const connectionMode = normalizeLiveSyncConnectionMode(config.connectionMode);
@@ -826,15 +881,18 @@ function checkServerVersion(sendToRenderer: (channel: string, data: any) => void
         const data = JSON.parse(body);
         if (data.ok && data.version) {
           const clientVer = getAppVersion();
-          if (data.version !== clientVer) {
-            console.warn(`[LiveSync] Version check: client ${clientVer}, server ${data.version}`);
-            sendToRenderer('live-sync:version-check', {
-              match: false,
-              clientVersion: clientVer,
-              serverVersion: data.version,
-              message: `Server v${data.version}, client v${clientVer}`,
-            });
-          }
+          const capabilities = data.capabilities && typeof data.capabilities === 'object' ? data.capabilities : {};
+          const missing = REQUIRED_SERVER_SAFETY_CAPABILITIES.filter((key) => capabilities[key] !== true);
+          const match = missing.length === 0;
+          if (!match) console.warn(`[LiveSync] Server safety check: missing ${missing.join(', ')}`);
+          sendToRenderer('live-sync:version-check', {
+            match,
+            clientVersion: clientVer,
+            serverVersion: data.version,
+            message: match
+              ? `Server v${data.version} is compatible with client v${clientVer}`
+              : `Server v${data.version} is missing required security capabilities: ${missing.join(', ')}`,
+          });
         }
       } catch { /* ignore parse errors — non-critical */ }
     });
@@ -1001,7 +1059,6 @@ function openWebSocketConnection(sendToRenderer: (channel: string, data: any) =>
     appVersion: getAppVersion(),
     protocolVersion: String(LIVE_SYNC_CLIENT_PROTOCOL_VERSION),
   });
-  if (config.apiKey) query.set('apiKey', config.apiKey);
   const wsPath = `${basePath}/ws/live-sync?${query.toString()}`;
   const wsKey = buildWebSocketKey();
 

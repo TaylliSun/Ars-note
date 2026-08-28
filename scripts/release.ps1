@@ -77,6 +77,22 @@ function Copy-Directory {
   Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Get-Sha256Hex {
+  param([string]$Path)
+
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($hasher.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+      $hasher.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 Set-Location $Root
 New-CleanDirectory $ReleaseOut
 New-Item -ItemType Directory -Force -Path $DesktopOut | Out-Null
@@ -162,13 +178,15 @@ Write-Step "Prepare NAS server update package"
 New-CleanDirectory $NasStage
 New-Item -ItemType Directory -Force -Path $ServerStage | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root "docker-compose.nas.yml") -Destination (Join-Path $NasStage "docker-compose.nas.yml") -Force
+Copy-Item -LiteralPath (Join-Path $Root "docker-compose.public.yml") -Destination (Join-Path $NasStage "docker-compose.public.yml") -Force
 Copy-Item -LiteralPath (Join-Path $Root ".env.example") -Destination (Join-Path $NasStage ".env.example") -Force
+Copy-Item -LiteralPath (Join-Path $Root "PUBLIC_DEPLOYMENT.md") -Destination (Join-Path $NasStage "PUBLIC_DEPLOYMENT.md") -Force
 Copy-Directory (Join-Path $Root "server\dist") (Join-Path $ServerStage "dist")
 
 $serverChecksumLines = Get-ChildItem -LiteralPath (Join-Path $ServerStage "dist") -File -Recurse |
   Sort-Object FullName |
   ForEach-Object {
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+    $hash = Get-Sha256Hex -Path $_.FullName
     $relative = $_.FullName.Substring($NasStage.Length + 1).Replace("\", "/")
     "$hash  $relative"
   }
@@ -186,7 +204,7 @@ This package updates only the self-hosted sync server code. It includes compiled
 
 If your existing Docker Compose already starts `ars-note-sync`, keep that compose file and only replace its mounted `server/dist` folder. Never replace or delete `sync-data` during an update.
 
-For a first deployment, copy `.env.example` to `.env` and set a unique random `ARS_NOTE_SERVER_API_KEY` of at least 16 characters (32+ recommended). The supplied compose file refuses to start without it.
+For a first deployment, copy `.env.example` to `.env` and set a unique random `ARS_NOTE_SERVER_API_KEY` of at least 32 characters. The supplied compose files refuse to start without it.
 
 1. Upload this package, zip, or tar.gz to your NAS deploy directory.
 2. Replace the existing `server/dist` with this package's `server/dist`.
@@ -208,6 +226,8 @@ Client server URL must be only scheme + host + port:
 Do not append `/admin`.
 
 Do not expose port 8787 directly to the public Internet. Prefer Tailscale or another trusted VPN. If Internet access is unavoidable, use HTTPS through a restricted reverse proxy and keep the server API key private.
+
+For an Internet-facing deployment, follow `PUBLIC_DEPLOYMENT.md` and use `docker-compose.public.yml`. Public mode requires a trusted HTTPS reverse proxy, binds the container port to loopback, rejects URL credentials, and fails closed when TLS proxy metadata is missing.
 
 ## If your current compose uses absolute paths
 
@@ -252,6 +272,7 @@ $publicDocNames = @(
   "PUBLIC_RELEASE_CHECKLIST.md",
   "SELF_HOSTED_SERVER.md",
   "SELF_HOSTED_OPERATIONS.md",
+  "PUBLIC_DEPLOYMENT.md",
   "NAS_DEPLOY_STEPS.md",
   "THIRD_PARTY_NOTICES.md"
 )
@@ -297,7 +318,7 @@ if (-not $NoArchive) {
   }
 }
 $checksumLines = $checksumTargets | ForEach-Object {
-  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+  $hash = Get-Sha256Hex -Path $_.FullName
   "$hash  $($_.Name)"
 }
 $checksumLines | Set-Content -LiteralPath $ChecksumsPath -Encoding UTF8

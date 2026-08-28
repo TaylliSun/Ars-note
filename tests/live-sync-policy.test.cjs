@@ -3,9 +3,19 @@ const assert = require('node:assert/strict');
 
 const {
   canSendLiveWriteAfterPreflight,
+  getInsecurePublicLiveSyncReason,
   getJoinSnapshotAuthorityDecision,
   shouldGuardDestructiveTruncation,
 } = require('../dist-electron/liveSync.js');
+
+test('public HTTP sync endpoints are blocked while LAN and encrypted endpoints remain valid', () => {
+  assert.match(getInsecurePublicLiveSyncReason('http://203.0.113.20:8787'), /https:\/\//);
+  assert.match(getInsecurePublicLiveSyncReason('http://sync.example.com'), /https:\/\//);
+  assert.equal(getInsecurePublicLiveSyncReason('https://sync.example.com'), '');
+  assert.equal(getInsecurePublicLiveSyncReason('http://192.168.1.20:8787'), '');
+  assert.equal(getInsecurePublicLiveSyncReason('http://100.66.1.1:8787'), '');
+  assert.equal(getInsecurePublicLiveSyncReason('http://nas.local:8787'), '');
+});
 
 test('existing device reconciles a stale global baseline per file', () => {
   const decision = getJoinSnapshotAuthorityDecision({

@@ -54,7 +54,17 @@ import {
   SERVER_BUILD_ID,
   SERVER_VERSION,
 } from './types';
-import { requireApiKey, isDevMode, getServerApiKey } from './auth';
+import { requireApiKey, isDevMode, getServerApiKey, isValidServerApiKey } from './auth';
+import {
+  applySecurityHeaders,
+  AuthFailureLimiter,
+  createServerSecurityConfig,
+  describeSecurityConfig,
+  getClientIp,
+  isLoopbackBindHost,
+  isSecureRequest,
+  resolveCorsOrigin,
+} from './security';
 import { handleAISyncPush, handleAISyncPull, handleAISyncStatus } from './routes/aiSync';
 import {
   registerClient,
@@ -76,14 +86,28 @@ import {
 const PORT = parseInt(process.env.ARSNOTE_PORT || '3141', 10);
 const HOST = process.env.ARSNOTE_HOST || '127.0.0.1';
 const STORAGE_BACKEND = (process.env.ARS_NOTE_STORAGE_BACKEND || 'local').toLowerCase();
-const REQUIRE_API_KEY = parseEnvBoolean(process.env.ARS_NOTE_REQUIRE_API_KEY, false);
+const SECURITY = createServerSecurityConfig(process.env);
+const REQUIRE_API_KEY = SECURITY.publicMode || parseEnvBoolean(
+  process.env.ARS_NOTE_REQUIRE_API_KEY,
+  !isLoopbackBindHost(HOST),
+);
 const SERVER_STARTED_AT = new Date().toISOString();
 const SERVER_EXPORT_AUTO_ENABLED = parseEnvBoolean(process.env.ARS_NOTE_SERVER_EXPORT_AUTO, true);
 const SERVER_EXPORT_INTERVAL_MS = Math.max(5 * 60 * 1000, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_SERVER_EXPORT_INTERVAL_HOURS, 24) * 60 * 60 * 1000));
 const SERVER_EXPORT_STARTUP_DELAY_MS = Math.max(10_000, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_SERVER_EXPORT_STARTUP_DELAY_MS, 60_000)));
 const SERVER_EXPORT_KEEP_LATEST = Math.max(1, Math.min(60, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_SERVER_EXPORT_KEEP_LATEST, 7))));
-const MAX_HTTP_BODY_BYTES = Math.max(1024 * 1024, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_MAX_HTTP_BODY_BYTES, 256 * 1024 * 1024)));
-const MAX_WEBSOCKET_MESSAGE_BYTES = Math.max(1024 * 1024, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES, 256 * 1024 * 1024)));
+const MAX_HTTP_BODY_BYTES = Math.max(1024 * 1024, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_MAX_HTTP_BODY_BYTES, 64 * 1024 * 1024)));
+const MAX_WEBSOCKET_MESSAGE_BYTES = Math.max(1024 * 1024, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES, 64 * 1024 * 1024)));
+const MAX_HTTP_HEADER_BYTES = Math.max(8 * 1024, Math.min(64 * 1024, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_MAX_HTTP_HEADER_BYTES, 16 * 1024))));
+const HTTP_REQUEST_TIMEOUT_MS = Math.max(10_000, Math.min(10 * 60 * 1000, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_HTTP_REQUEST_TIMEOUT_MS, 120_000))));
+const HTTP_HEADERS_TIMEOUT_MS = Math.max(5_000, Math.min(HTTP_REQUEST_TIMEOUT_MS, Math.floor(parsePositiveNumber(process.env.ARS_NOTE_HTTP_HEADERS_TIMEOUT_MS, 30_000))));
+const authFailureLimiter = new AuthFailureLimiter(
+  SECURITY.authFailureLimit,
+  SECURITY.authFailureWindowMs,
+  SECURITY.authBlockMs,
+);
+const webSocketConnectionsByIp = new Map<string, number>();
+let activeWebSocketConnections = 0;
 
 /* ── Storage backend factory (v0.8.6) ── */
 
@@ -166,6 +190,12 @@ function buildServerCapabilities(storageBackend: StorageBackend): Record<string,
     startupStorageReadiness: true,
     payloadLimits: true,
     metadataOnlySnapshots: localAtomicStorage,
+    constantTimeAuthentication: true,
+    authFailureRateLimit: true,
+    apiKeyHeaderOnly: !SECURITY.allowApiKeyInQuery,
+    httpSecurityHeaders: true,
+    webSocketProtocolValidation: true,
+    publicHttpsEnforcementAvailable: true,
   };
 }
 
@@ -486,22 +516,40 @@ function normalizeKnownRoutePath(pathname: string): string {
   return KNOWN_ROUTE_PATHS.find((route) => pathname.endsWith(route)) || pathname;
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer({ maxHeaderSize: MAX_HTTP_HEADER_BYTES }, async (req, res) => {
   try {
-    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const url = new URL(req.url || '/', 'http://localhost');
     const pathname = url.pathname;
     const routePath = normalizeKnownRoutePath(pathname);
     const method = (req.method || 'GET').toUpperCase();
+    const secureRequest = isSecureRequest(req, SECURITY.trustProxy);
+    const corsOrigin = resolveCorsOrigin(req, SECURITY);
 
-    /* CORS headers for local dev */
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    applySecurityHeaders(res, {
+      html: routePath === '/' || routePath === '/admin',
+      secure: secureRequest,
+    });
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+      if (corsOrigin !== '*') res.setHeader('Vary', 'Origin');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-ars-note-api-key');
 
     if (method === 'OPTIONS') {
+      if (corsOrigin === null) return json(res, { ok: false, error: 'Origin not allowed' }, 403);
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    if (!['GET', 'POST'].includes(method)) {
+      res.setHeader('Allow', 'GET, POST, OPTIONS');
+      return json(res, { ok: false, error: 'Method not allowed' }, 405);
+    }
+
+    if (SECURITY.requireHttps && routePath !== '/health' && !secureRequest) {
+      return json(res, { ok: false, error: 'HTTPS is required for this server' }, 426);
     }
 
     /* ── Route matching ── */
@@ -522,6 +570,7 @@ const server = http.createServer(async (req, res) => {
         tombstoneRetentionDays: LIVE_SYNC_TOMBSTONE_RETENTION_DAYS,
         capabilities,
         safetyProfile: buildSafetyProfile(capabilities),
+        security: describeSecurityConfig(SECURITY),
         serverTime: new Date().toISOString(),
         uptimeSeconds: Math.floor(process.uptime()),
       });
@@ -533,10 +582,19 @@ const server = http.createServer(async (req, res) => {
 
     /* ── API Key Auth Gate (v0.8.2) ── */
     if (routePath.startsWith('/api/')) {
+      const clientIp = getClientIp(req, SECURITY.trustProxy);
+      const retryAfter = authFailureLimiter.retryAfterSeconds(clientIp);
+      if (retryAfter > 0) {
+        res.setHeader('Retry-After', String(retryAfter));
+        return json(res, { ok: false, error: 'Too many authentication attempts' }, 429);
+      }
       const authResult = requireApiKey(req);
       if (!authResult.ok) {
+        const blockedFor = authFailureLimiter.recordFailure(clientIp);
+        console.warn(`[Security] Rejected API authentication from ${clientIp}${blockedFor > 0 ? ' (temporarily blocked)' : ''}`);
         return json(res, { ok: false, error: authResult.error }, authResult.statusCode || 401);
       }
+      authFailureLimiter.recordSuccess(clientIp);
     }
 
     if (routePath === '/api/admin/overview' && method === 'GET') {
@@ -547,6 +605,7 @@ const server = http.createServer(async (req, res) => {
         startedAt: SERVER_STARTED_AT,
         apiKeyConfigured: !!getServerApiKey(),
         devMode: isDevMode(),
+        security: describeSecurityConfig(SECURITY),
       }));
     }
 
@@ -806,6 +865,7 @@ const server = http.createServer(async (req, res) => {
         uptimeSeconds: Math.floor(process.uptime()),
         apiKeyConfigured: !!getServerApiKey(),
         devMode: isDevMode(),
+        security: describeSecurityConfig(SECURITY),
         liveSyncPolicy: getLiveSyncPolicy(),
         capabilities,
         safetyProfile,
@@ -893,11 +953,22 @@ const server = http.createServer(async (req, res) => {
     const statusCode = Number(err?.statusCode || 500);
     if (statusCode === 413) res.setHeader('Connection', 'close');
     if (!res.headersSent) {
-      json(res, { ok: false, error: err.message || 'Internal server error' }, statusCode);
+      const clientMessage = statusCode >= 500 ? 'Internal server error' : (err.message || 'Request failed');
+      json(res, { ok: false, error: clientMessage }, statusCode);
     } else if (!res.writableEnded) {
       res.end();
     }
   }
+});
+
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+server.keepAliveTimeout = 5_000;
+server.maxHeadersCount = 64;
+server.on('clientError', (err: NodeJS.ErrnoException, socket) => {
+  if (!socket.writable) return;
+  const status = err.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large' : '400 Bad Request';
+  socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 });
 
 /* ═══════════════════════════════════════════════════
@@ -940,8 +1011,15 @@ function parseWebSocketFrame(data: Buffer): { opcode: number; payload: string } 
   return { opcode, payload: payload.toString('utf-8') };
 }
 
-function inspectWebSocketFrame(data: Buffer): { payloadLength: number; frameSize: number } | null {
+function inspectWebSocketFrame(data: Buffer): {
+  payloadLength: number;
+  frameSize: number;
+  isMasked: boolean;
+  fin: boolean;
+  opcode: number;
+} | null {
   if (data.length < 2) return null;
+  const firstByte = data[0];
   const secondByte = data[1];
   const isMasked = (secondByte & 0x80) !== 0;
   let payloadLength = secondByte & 0x7F;
@@ -961,6 +1039,9 @@ function inspectWebSocketFrame(data: Buffer): { payloadLength: number; frameSize
   return {
     payloadLength,
     frameSize: headerSize + (isMasked ? 4 : 0) + payloadLength,
+    isMasked,
+    fin: (firstByte & 0x80) !== 0,
+    opcode: firstByte & 0x0F,
   };
 }
 
@@ -998,9 +1079,54 @@ function wsSend(socket: any, data: string): void {
   } catch { /* ignore write errors */ }
 }
 
+function createWebSocketControlFrame(opcode: number, payload: Buffer = Buffer.alloc(0)): Buffer {
+  const safePayload = payload.subarray(0, 125);
+  const frame = Buffer.alloc(2 + safePayload.length);
+  frame[0] = 0x80 | (opcode & 0x0F);
+  frame[1] = safePayload.length;
+  safePayload.copy(frame, 2);
+  return frame;
+}
+
+function closeWebSocket(socket: any, code: number, reason: string): void {
+  try {
+    const reasonBuffer = Buffer.from(reason, 'utf8').subarray(0, 123);
+    const payload = Buffer.alloc(2 + reasonBuffer.length);
+    payload.writeUInt16BE(code, 0);
+    reasonBuffer.copy(payload, 2);
+    socket.end(createWebSocketControlFrame(0x8, payload));
+  } catch {
+    socket.destroy();
+  }
+}
+
+function rejectWebSocketUpgrade(socket: any, status: string, retryAfterSeconds = 0): void {
+  const retryHeader = retryAfterSeconds > 0 ? `Retry-After: ${retryAfterSeconds}\r\n` : '';
+  socket.end(
+    `HTTP/1.1 ${status}\r\n` +
+    `${retryHeader}Connection: close\r\n` +
+    'Cache-Control: no-store\r\n' +
+    'Content-Length: 0\r\n\r\n',
+  );
+}
+
 function performHandshake(req: http.IncomingMessage, socket: any, head: Buffer): boolean {
   const wsKey = req.headers['sec-websocket-key'];
-  if (!wsKey) return false;
+  const upgrade = String(req.headers.upgrade || '').toLowerCase();
+  const connection = String(req.headers.connection || '').toLowerCase();
+  const version = String(req.headers['sec-websocket-version'] || '');
+  if (
+    req.method !== 'GET' ||
+    typeof wsKey !== 'string' ||
+    upgrade !== 'websocket' ||
+    !connection.split(',').some((token) => token.trim() === 'upgrade') ||
+    version !== '13'
+  ) return false;
+  try {
+    if (Buffer.from(wsKey, 'base64').length !== 16) return false;
+  } catch {
+    return false;
+  }
 
   const acceptHash = crypto
     .createHash('sha1')
@@ -1017,42 +1143,70 @@ function performHandshake(req: http.IncomingMessage, socket: any, head: Buffer):
 }
 
 server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  const url = new URL(req.url || '/', 'http://localhost');
   const pathname = url.pathname;
   const routePath = normalizeKnownRoutePath(pathname);
+  const clientIp = getClientIp(req, SECURITY.trustProxy);
 
   if (routePath !== '/ws/live-sync') {
-    socket.destroy();
+    rejectWebSocketUpgrade(socket, '404 Not Found');
     return;
   }
 
-  /* Auth check */
-  const configuredKey = getServerApiKey();
-  if (configuredKey) {
-    const authHeader = req.headers['authorization'];
-    const customHeader = req.headers['x-ars-note-api-key'];
-    const queryKey = url.searchParams.get('apiKey');
-    const key = (authHeader && String(authHeader).replace('Bearer ', '')) || customHeader || queryKey;
-    if (key !== configuredKey) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+  if (SECURITY.requireHttps && !isSecureRequest(req, SECURITY.trustProxy)) {
+    rejectWebSocketUpgrade(socket, '426 Upgrade Required');
+    return;
   }
+
+  if (resolveCorsOrigin(req, SECURITY) === null) {
+    console.warn(`[Security] Rejected WebSocket origin from ${clientIp}`);
+    rejectWebSocketUpgrade(socket, '403 Forbidden');
+    return;
+  }
+
+  const retryAfter = authFailureLimiter.retryAfterSeconds(clientIp);
+  if (retryAfter > 0) {
+    rejectWebSocketUpgrade(socket, '429 Too Many Requests', retryAfter);
+    return;
+  }
+
+  let authResult = requireApiKey(req);
+  if (!authResult.ok && SECURITY.allowApiKeyInQuery && isValidServerApiKey(url.searchParams.get('apiKey'))) {
+    authResult = { ok: true };
+  }
+  if (!authResult.ok) {
+    const blockedFor = authFailureLimiter.recordFailure(clientIp);
+    console.warn(`[Security] Rejected WebSocket authentication from ${clientIp}${blockedFor > 0 ? ' (temporarily blocked)' : ''}`);
+    rejectWebSocketUpgrade(socket, '401 Unauthorized');
+    return;
+  }
+  authFailureLimiter.recordSuccess(clientIp);
 
   /* Get vaultId from query */
   const vaultId = url.searchParams.get('vaultId');
-  if (!vaultId) {
-    socket.write('HTTP/1.1 400 Bad Request\r\n\r\nMissing vaultId\r\n');
-    socket.destroy();
+  if (!vaultId || Buffer.byteLength(vaultId, 'utf8') > 256 || /[\x00-\x1f\\/]/u.test(vaultId)) {
+    rejectWebSocketUpgrade(socket, '400 Bad Request');
+    return;
+  }
+
+  const ipConnectionCount = webSocketConnectionsByIp.get(clientIp) || 0;
+  if (
+    activeWebSocketConnections >= SECURITY.maxWebSocketConnections ||
+    ipConnectionCount >= SECURITY.maxWebSocketConnectionsPerIp
+  ) {
+    console.warn(`[Security] Rejected WebSocket connection limit from ${clientIp}`);
+    rejectWebSocketUpgrade(socket, '429 Too Many Requests', 30);
     return;
   }
 
   /* Perform WebSocket handshake */
   if (!performHandshake(req, socket, head)) {
-    socket.destroy();
+    rejectWebSocketUpgrade(socket, '400 Bad Request');
     return;
   }
+
+  activeWebSocketConnections += 1;
+  webSocketConnectionsByIp.set(clientIp, ipConnectionCount + 1);
 
   const wsProxy = {
     send: (data: string) => wsSend(socket, data),
@@ -1066,6 +1220,15 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
     appVersion: url.searchParams.get('appVersion') || undefined,
     protocolVersion: url.searchParams.get('protocolVersion') || undefined,
   });
+  let connectionSlotReleased = false;
+  const releaseConnectionSlot = () => {
+    if (connectionSlotReleased) return;
+    connectionSlotReleased = true;
+    activeWebSocketConnections = Math.max(0, activeWebSocketConnections - 1);
+    const current = webSocketConnectionsByIp.get(clientIp) || 0;
+    if (current <= 1) webSocketConnectionsByIp.delete(clientIp);
+    else webSocketConnectionsByIp.set(clientIp, current - 1);
+  };
   console.log(`[LiveSync] Client ${client.clientId} connected to vault "${vaultId}" (${getVaultClients(vaultId).length} clients)`);
   void persistLiveSyncClientHistory(storage, client);
   void persistLiveSyncClientEvent(storage, client, 'connect', {
@@ -1097,16 +1260,40 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
       .catch(() => {});
   }
 
-  let buffer = Buffer.alloc(0);
+  let buffer = head?.length ? Buffer.from(head) : Buffer.alloc(0);
+  let messageWindowStartedAt = Date.now();
+  let messagesInWindow = 0;
   socket.on('data', (chunk: Buffer) => {
     buffer = Buffer.concat([buffer, chunk]);
+    if (buffer.length > MAX_WEBSOCKET_MESSAGE_BYTES + 14) {
+      console.warn(`[Security] Closing oversized WebSocket buffer from ${clientIp}`);
+      closeWebSocket(socket, 1009, 'Message too large');
+      return;
+    }
 
     while (buffer.length >= 2) {
       const frameInfo = inspectWebSocketFrame(buffer);
       if (!frameInfo) break;
       if (!Number.isFinite(frameInfo.payloadLength) || frameInfo.payloadLength > MAX_WEBSOCKET_MESSAGE_BYTES) {
         console.warn(`[LiveSync] Closing oversized WebSocket message from ${client.clientId}: ${frameInfo.payloadLength} bytes`);
-        socket.end();
+        closeWebSocket(socket, 1009, 'Message too large');
+        return;
+      }
+      if (!frameInfo.isMasked) {
+        console.warn(`[Security] Closing unmasked WebSocket frame from ${clientIp}`);
+        closeWebSocket(socket, 1002, 'Client frames must be masked');
+        return;
+      }
+      if (!frameInfo.fin) {
+        closeWebSocket(socket, 1003, 'Fragmented messages are not supported');
+        return;
+      }
+      if (![0x1, 0x8, 0x9, 0xA].includes(frameInfo.opcode)) {
+        closeWebSocket(socket, 1003, 'Unsupported frame type');
+        return;
+      }
+      if (frameInfo.opcode >= 0x8 && frameInfo.payloadLength > 125) {
+        closeWebSocket(socket, 1002, 'Invalid control frame');
         return;
       }
       if (buffer.length < frameInfo.frameSize) break;
@@ -1114,13 +1301,24 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
       if (!frame) break;
 
       if (frame.opcode === 0x8) {
-        socket.end();
+        socket.end(createWebSocketControlFrame(0x8));
         return;
       }
       if (frame.opcode === 0x9) {
-        wsSend(socket, frame.payload);
+        socket.write(createWebSocketControlFrame(0xA, Buffer.from(frame.payload, 'utf8')));
       }
       if (frame.opcode === 0x1 && frame.payload) {
+        const now = Date.now();
+        if (now - messageWindowStartedAt >= 60_000) {
+          messageWindowStartedAt = now;
+          messagesInWindow = 0;
+        }
+        messagesInWindow += 1;
+        if (messagesInWindow > SECURITY.maxWebSocketMessagesPerMinute) {
+          console.warn(`[Security] Closing rate-limited WebSocket client ${client.clientId} from ${clientIp}`);
+          closeWebSocket(socket, 1008, 'Message rate limit exceeded');
+          return;
+        }
         handleMessage(client, frame.payload, storage);
       }
 
@@ -1129,6 +1327,7 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
   });
 
   socket.on('close', () => {
+    releaseConnectionSlot();
     void persistLiveSyncClientHistory(storage, client, {
       webSocketStatus: 'offline',
       disconnectedAt: new Date().toISOString(),
@@ -1144,6 +1343,7 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
   });
 
   socket.on('error', (err: any) => {
+    releaseConnectionSlot();
     void persistLiveSyncClientHistory(storage, client, {
       webSocketStatus: 'offline',
       disconnectedAt: new Date().toISOString(),
@@ -1161,8 +1361,17 @@ server.on('upgrade', (req: http.IncomingMessage, socket: any, head: Buffer) => {
 
 async function startServer(): Promise<void> {
   const configuredApiKey = getServerApiKey() || '';
-  if (REQUIRE_API_KEY && configuredApiKey.length < 16) {
-    throw new Error('ARS_NOTE_REQUIRE_API_KEY=true requires ARS_NOTE_SERVER_API_KEY with at least 16 characters');
+  if (REQUIRE_API_KEY && configuredApiKey.length < SECURITY.minApiKeyLength) {
+    throw new Error(`Authenticated deployment requires ARS_NOTE_SERVER_API_KEY with at least ${SECURITY.minApiKeyLength} characters`);
+  }
+  if (configuredApiKey && configuredApiKey.trim() !== configuredApiKey) {
+    throw new Error('ARS_NOTE_SERVER_API_KEY must not start or end with whitespace');
+  }
+  if (SECURITY.publicMode && !SECURITY.trustProxy) {
+    throw new Error('ARS_NOTE_SECURITY_MODE=public requires ARS_NOTE_TRUST_PROXY=true behind an HTTPS reverse proxy');
+  }
+  if (SECURITY.publicMode && SECURITY.allowedOrigins.includes('*')) {
+    throw new Error('ARS_NOTE_SECURITY_MODE=public does not allow wildcard CORS; set ARS_NOTE_ALLOWED_ORIGINS to null and any trusted web origins');
   }
   await storage.initialize();
   if (storage.listVaults && storage.pruneIgnoredLiveFiles) {
@@ -1179,7 +1388,8 @@ async function startServer(): Promise<void> {
   server.listen(PORT, HOST, () => {
   console.log(`${SERVER_APP_NAME} v${SERVER_VERSION} listening on http://${HOST}:${PORT}`);
   console.log(`  Build ID: ${SERVER_BUILD_ID}`);
-  console.log(`  Live Sync: ws://${HOST}:${PORT}/ws/live-sync?vaultId=<vaultId>`);
+  console.log(`  Live Sync: ${SECURITY.requireHttps ? 'wss://PUBLIC_HOST' : `ws://${HOST}:${PORT}`}/ws/live-sync?vaultId=<vaultId>`);
+  console.log(`  Security mode: ${SECURITY.mode}; HTTPS required=${SECURITY.requireHttps}; trusted proxy=${SECURITY.trustProxy}; query credentials=${SECURITY.allowApiKeyInQuery ? 'legacy enabled' : 'disabled'}`);
   const liveSyncPolicy = getLiveSyncPolicy();
   console.log(`  Live Sync policy: requiredProtocolVersion=${liveSyncPolicy.requiredProtocolVersion}, legacyLiveWritesAllowed=${liveSyncPolicy.legacyLiveWritesAllowed}`);
   const capabilities = buildServerCapabilities(storage);

@@ -1,8 +1,36 @@
-/* ── Canvas Editor (v2.0.0) ── */
-/* Obsidian Canvas-like visual workspace for Ars-note */
+/* ── Canvas Editor (v2.1.0) ── */
+/* Ars-note visual Canvas workspace */
 /* Smooth dragging, momentum panning, pinch-zoom, snap-to-grid */
 
-import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import React, { useDeferredValue, useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import {
+  canReparentMindMapNode,
+  createMindMapIndex,
+  getMindMapAncestorIds,
+  getMindMapBranchSide,
+  getMindMapChildrenIds,
+  getMindMapChildCount,
+  getMindMapDescendantIds,
+  getMindMapDropPlacement,
+  getMindMapNavigationTarget,
+  getMindMapParentId,
+  getMindMapRootIds,
+  getMindMapVisibleNodeIds,
+  layoutMindMapNodes,
+  normalizeMindMapEdges,
+  reorderMindMapSiblingEdges,
+  sanitizeMindMapEdges,
+  hasExceededMindMapDragThreshold,
+  type MindMapCanvasMode,
+  type MindMapDropPlacement,
+} from '../utils/mindMapLayout';
+import {
+  cloneMindMapBranch,
+  createMindMapBranchSnapshot,
+  formatMindMapBranchOutline,
+  parseMindMapOutline,
+  type MindMapClipboardSnapshot,
+} from '../utils/mindMapClipboard';
 
 /* ═══════════════════════════════════════════════════════
    Types
@@ -18,6 +46,8 @@ interface CanvasNode {
   color?: string;
   text?: string;
   file?: string;
+  collapsed?: boolean;
+  branchSide?: 'left' | 'right';
 }
 
 interface CanvasEdge {
@@ -32,9 +62,20 @@ interface CanvasEdge {
 
 type CanvasSide = NonNullable<CanvasEdge['fromSide']>;
 type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se';
-type CanvasSnapshot = { nodes: CanvasNode[]; edges: CanvasEdge[]; selected: string | null; selectedEdge: string | null };
-type SaveCanvasOptions = { history?: boolean; immediate?: boolean; historySnapshot?: CanvasSnapshot | null };
+type CanvasSnapshot = {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  selected: string | null;
+  selectedEdge: string | null;
+  canvasMode: MindMapCanvasMode;
+};
+type CanvasMindMapClipboard = {
+  snapshot: MindMapClipboardSnapshot<CanvasNode, CanvasEdge>;
+  plainText: string;
+};
+type SaveCanvasOptions = { history?: boolean; immediate?: boolean; historySnapshot?: CanvasSnapshot | null; preserveRedo?: boolean };
 type ContextMenuState = { x: number; y: number; nodeId: string | null; edgeId?: string | null } | null;
+type MindMapDropHint = { targetId: string; placement: MindMapDropPlacement };
 type CanvasQualityLevel = 'good' | 'warn' | 'bad';
 
 interface CanvasQualitySummary {
@@ -50,6 +91,8 @@ interface CanvasQualitySummary {
   recommendations: string[];
   tooltip: string;
 }
+
+let sharedMindMapClipboard: CanvasMindMapClipboard | null = null;
 
 /* ═══════════════════════════════════════════════════════
    Constants
@@ -71,7 +114,7 @@ const GRID_SIZE = 20;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.15;
-const CANVAS_LAYOUT_VERSION = 2;
+const CANVAS_LAYOUT_VERSION = 3;
 const RESIZE_HANDLES: ResizeDirection[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const MAX_HISTORY = 80;
 const READABLE_CARD_MAX_LINES = 11;
@@ -86,6 +129,20 @@ const AUTO_LAYOUT_ROW_GAP = 34;
 const AUTO_LAYOUT_GROUP_WIDTH = 560;
 const AUTO_LAYOUT_GROUP_HEADER = 92;
 const AUTO_LAYOUT_GROUP_PADDING = 36;
+const MIND_MAP_SHORTCUTS = [
+  ['Tab', '新建子主题'],
+  ['Enter', '新建同级主题'],
+  ['Shift + Tab', '提升到上一层'],
+  ['方向键', '沿导图结构导航'],
+  ['Alt + ↑ / ↓', '调整同级顺序'],
+  ['Alt + ← / →', '切换一级分支左右侧'],
+  ['Ctrl + C / X / V', '复制、剪切或粘贴分支'],
+  ['Ctrl + F', '搜索并定位主题'],
+  ['Space', '折叠或展开分支'],
+  ['F2', '编辑当前主题'],
+  ['Delete', '删除整个分支'],
+  ['Esc', '取消编辑或关闭浮层'],
+] as const;
 
 /* ═══════════════════════════════════════════════════════
    Helpers
@@ -102,12 +159,12 @@ function cloneEdges(edges: CanvasEdge[]): CanvasEdge[] {
   return edges.map(edge => ({ ...edge }));
 }
 
-function serializeCanvas(nodes: CanvasNode[], edges: CanvasEdge[]): string {
-  return JSON.stringify({ layoutVersion: CANVAS_LAYOUT_VERSION, nodes, edges });
+function serializeCanvas(nodes: CanvasNode[], edges: CanvasEdge[], canvasMode: MindMapCanvasMode): string {
+  return JSON.stringify({ layoutVersion: CANVAS_LAYOUT_VERSION, mode: canvasMode, nodes, edges });
 }
 
 function snapshotEquals(a: CanvasSnapshot, b: CanvasSnapshot): boolean {
-  return serializeCanvas(a.nodes, a.edges) === serializeCanvas(b.nodes, b.edges);
+  return serializeCanvas(a.nodes, a.edges, a.canvasMode) === serializeCanvas(b.nodes, b.edges, b.canvasMode);
 }
 
 function estimateCardTextLines(text: string, width: number): number {
@@ -132,6 +189,32 @@ function estimateCardTextLines(text: string, width: number): number {
     lines += lineCount;
   }
   return Math.max(1, lines);
+}
+
+function mindMapNodeSize(text: string, isRoot = false): { width: number; height: number } {
+  const lines = String(text || '').split('\n');
+  const longestUnits = lines.reduce((max, line) => {
+    const units = [...line].reduce((sum, char) => sum + (/[^\x00-\xff]/.test(char) ? 1 : 0.58), 0);
+    return Math.max(max, units);
+  }, 0);
+  const minWidth = isRoot ? 240 : 180;
+  const maxWidth = 360;
+  const width = Math.max(minWidth, Math.min(maxWidth, Math.round(54 + longestUnits * 8.2)));
+  const visualLines = estimateCardTextLines(text, width);
+  const minHeight = isRoot ? 68 : 56;
+  const maxHeight = isRoot ? 140 : 220;
+  return {
+    width,
+    height: Math.max(minHeight, Math.min(maxHeight, 30 + visualLines * 20)),
+  };
+}
+
+function sizeMindMapNodesToContent(nodes: CanvasNode[], edges: CanvasEdge[]): CanvasNode[] {
+  const childIds = new Set(edges.map((edge) => edge.toNode));
+  return nodes.map((node) => {
+    if (node.type !== 'text') return node;
+    return { ...node, ...mindMapNodeSize(node.text || '', !childIds.has(node.id)) };
+  });
 }
 
 function splitReadableCanvasLine(rawLine: string, width: number, maxLines: number): string[] {
@@ -651,6 +734,8 @@ function renderCardMarkdown(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
     /* Headings: # H1 → styled heading */
     .replace(/^### (.+)$/gm, '<div class="cv-md-h3">$1</div>')
     .replace(/^## (.+)$/gm, '<div class="cv-md-h2">$1</div>')
@@ -721,6 +806,13 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [qualityPanelOpen, setQualityPanelOpen] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
+  const [canvasMode, setCanvasMode] = useState<MindMapCanvasMode>('free');
+  const [mindMapOutlineOpen, setMindMapOutlineOpen] = useState(false);
+  const [mindMapSearchOpen, setMindMapSearchOpen] = useState(false);
+  const [mindMapHelpOpen, setMindMapHelpOpen] = useState(false);
+  const [mindMapSearchQuery, setMindMapSearchQuery] = useState('');
+  const [mindMapSearchIndex, setMindMapSearchIndex] = useState(0);
+  const [mindMapNotice, setMindMapNotice] = useState('');
 
   /* Refs for imperative drag state — no re-renders during drag */
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -735,7 +827,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   const editingRef = useRef<string | null>(null);
 
   /* Drag state refs */
-  const modeRef = useRef<'idle' | 'pan' | 'drag' | 'resize' | 'connect' | 'select-box'>('idle');
+  const modeRef = useRef<'idle' | 'pan' | 'press-node' | 'drag' | 'resize' | 'connect' | 'select-box'>('idle');
   const dragInfoRef = useRef<{ nodeId: string; startX: number; startY: number; nodeX: number; nodeY: number } | null>(null);
   const resizeInfoRef = useRef<{
     nodeId: string;
@@ -758,7 +850,14 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   const undoStackRef = useRef<CanvasSnapshot[]>([]);
   const redoStackRef = useRef<CanvasSnapshot[]>([]);
   const interactionStartSnapshotRef = useRef<CanvasSnapshot | null>(null);
+  const editStartSnapshotRef = useRef<CanvasSnapshot | null>(null);
   const lastSerializedRef = useRef('');
+  const canvasModeRef = useRef<MindMapCanvasMode>('free');
+  const mindMapDropTargetRef = useRef<MindMapDropHint | null>(null);
+  const mindMapDragTargetsRef = useRef<CanvasNode[]>([]);
+  const lastMindMapAutoFitKeyRef = useRef('');
+  const mindMapSearchInputRef = useRef<HTMLInputElement>(null);
+  const mindMapNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* Keep refs in sync */
   nodesRef.current = nodes;
@@ -768,12 +867,20 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   selectedRef.current = selected;
   selectedEdgeRef.current = selectedEdge;
   editingRef.current = editing;
+  canvasModeRef.current = canvasMode;
+
+  const showMindMapNotice = useCallback((message: string) => {
+    setMindMapNotice(message);
+    if (mindMapNoticeTimerRef.current) clearTimeout(mindMapNoticeTimerRef.current);
+    mindMapNoticeTimerRef.current = setTimeout(() => setMindMapNotice(''), 2200);
+  }, []);
 
   const makeSnapshot = useCallback((): CanvasSnapshot => ({
     nodes: cloneNodes(nodesRef.current),
     edges: cloneEdges(edgesRef.current),
     selected: selectedRef.current,
     selectedEdge: selectedEdgeRef.current,
+    canvasMode: canvasModeRef.current,
   }), []);
 
   const pushHistory = useCallback((snapshot: CanvasSnapshot) => {
@@ -786,7 +893,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   }, [makeSnapshot]);
 
   const persistCanvas = useCallback((n: CanvasNode[], e: CanvasEdge[], immediate = false) => {
-    const serialized = serializeCanvas(n, e);
+    const serialized = serializeCanvas(n, e, canvasModeRef.current);
     lastSerializedRef.current = serialized;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (immediate) {
@@ -811,6 +918,8 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     selectedEdgeRef.current = snapshot.selectedEdge;
     setEditing(null);
     editingRef.current = null;
+    setCanvasMode(snapshot.canvasMode);
+    canvasModeRef.current = snapshot.canvasMode;
     multiSelectRef.current.clear();
     if (persist) persistCanvas(nextNodes, nextEdges, true);
   }, [persistCanvas]);
@@ -822,6 +931,8 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
       setEdges([]);
       nodesRef.current = [];
       edgesRef.current = [];
+      setCanvasMode('free');
+      canvasModeRef.current = 'free';
       hasLoadedValidContentRef.current = true;
       return;
     }
@@ -830,11 +941,22 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
       const data = JSON.parse(content);
       const rawNodes = Array.isArray(data.nodes) ? data.nodes : [];
       const parsedEdges = Array.isArray(data.edges) ? data.edges : [];
-      const normalized = normalizeCanvasDataForDisplay(rawNodes, parsedEdges);
+      const parsedMode: MindMapCanvasMode = data.mode === 'mindmap' ? 'mindmap' : 'free';
+      const normalizedBase = normalizeCanvasDataForDisplay(rawNodes, parsedEdges);
+      const normalized = parsedMode === 'mindmap'
+        ? (() => {
+          const contentSizedNodes = sizeMindMapNodesToContent(normalizedBase.nodes, normalizedBase.edges);
+          const safeEdges = sanitizeMindMapEdges(contentSizedNodes, normalizedBase.edges);
+          const mindMapNodes = layoutMindMapNodes(contentSizedNodes, safeEdges);
+          return { nodes: mindMapNodes, edges: normalizeMindMapEdges(safeEdges, mindMapNodes) };
+        })()
+        : normalizedBase;
       setNodes(normalized.nodes);
       setEdges(normalized.edges);
+      setCanvasMode(parsedMode);
       nodesRef.current = normalized.nodes;
       edgesRef.current = normalized.edges;
+      canvasModeRef.current = parsedMode;
       hasLoadedValidContentRef.current = true;
     } catch {
       if (!hasLoadedValidContentRef.current) {
@@ -852,6 +974,8 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         setEdges(recovered.edges);
         nodesRef.current = recovered.nodes;
         edgesRef.current = recovered.edges;
+        setCanvasMode('free');
+        canvasModeRef.current = 'free';
       }
     }
   }, [content]);
@@ -860,6 +984,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     undoStackRef.current = [];
     redoStackRef.current = [];
     interactionStartSnapshotRef.current = null;
+    editStartSnapshotRef.current = null;
     setSelectedEdge(null);
     selectedEdgeRef.current = null;
     setContextMenu(null);
@@ -876,7 +1001,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     const shouldRecordHistory = options.history !== false;
     const previousSnapshot = options.historySnapshot ?? makeSnapshot();
     if (shouldRecordHistory) pushHistory(previousSnapshot);
-    else if (redoStackRef.current.length > 0) {
+    else if (!options.preserveRedo && redoStackRef.current.length > 0) {
       redoStackRef.current = [];
       setHistoryTick(tick => tick + 1);
     }
@@ -886,21 +1011,62 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     persistCanvas(n, e, options.immediate);
   }, [makeSnapshot, persistCanvas, pushHistory]);
 
+  const finishTextEditing = useCallback((commit: boolean) => {
+    if (!editingRef.current) return;
+    const startSnapshot = editStartSnapshotRef.current;
+    setEditing(null);
+    editingRef.current = null;
+    editStartSnapshotRef.current = null;
+
+    if (!commit && startSnapshot) {
+      applyCanvasSnapshot(startSnapshot);
+      return;
+    }
+    if (canvasModeRef.current === 'mindmap') {
+      const safeEdges = sanitizeMindMapEdges(nodesRef.current, edgesRef.current);
+      const laidOut = layoutMindMapNodes(nodesRef.current, safeEdges);
+      const normalizedEdges = normalizeMindMapEdges(safeEdges, laidOut);
+      setNodes(laidOut);
+      setEdges(normalizedEdges);
+      nodesRef.current = laidOut;
+      edgesRef.current = normalizedEdges;
+    }
+    if (startSnapshot) pushHistory(startSnapshot);
+    persistCanvas(nodesRef.current, edgesRef.current, true);
+  }, [applyCanvasSnapshot, persistCanvas, pushHistory]);
+
+  const beginTextEditing = useCallback((nodeId: string) => {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    if (!node || node.type !== 'text') return;
+    if (editingRef.current) finishTextEditing(true);
+    if (editingRef.current !== nodeId) editStartSnapshotRef.current = makeSnapshot();
+    multiSelectRef.current.clear();
+    multiSelectRef.current.add(nodeId);
+    setSelected(nodeId);
+    selectedRef.current = nodeId;
+    setSelectedEdge(null);
+    selectedEdgeRef.current = null;
+    setEditing(nodeId);
+    editingRef.current = nodeId;
+  }, [finishTextEditing, makeSnapshot]);
+
   const undoCanvas = useCallback(() => {
+    if (editingRef.current) finishTextEditing(true);
     const previous = undoStackRef.current.pop();
     if (!previous) return;
     redoStackRef.current.push(makeSnapshot());
     applyCanvasSnapshot(previous);
     setHistoryTick(tick => tick + 1);
-  }, [applyCanvasSnapshot, makeSnapshot]);
+  }, [applyCanvasSnapshot, finishTextEditing, makeSnapshot]);
 
   const redoCanvas = useCallback(() => {
+    if (editingRef.current) finishTextEditing(true);
     const next = redoStackRef.current.pop();
     if (!next) return;
     undoStackRef.current.push(makeSnapshot());
     applyCanvasSnapshot(next);
     setHistoryTick(tick => tick + 1);
-  }, [applyCanvasSnapshot, makeSnapshot]);
+  }, [applyCanvasSnapshot, finishTextEditing, makeSnapshot]);
 
   /* ── Screen → Canvas coordinate ── */
   const screenToCanvas = useCallback((clientX: number, clientY: number) => {
@@ -960,6 +1126,23 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     }
   }, []);
 
+  const setMindMapDropTarget = useCallback((hint: MindMapDropHint | null) => {
+    const current = mindMapDropTargetRef.current;
+    if (current?.targetId === hint?.targetId && current?.placement === hint?.placement) return;
+    if (current) {
+      viewportRef.current?.querySelector(`[data-node-id="${current.targetId}"]`)?.classList.remove(
+        'mindmap-drop-target',
+        'mindmap-drop-before',
+        'mindmap-drop-after',
+      );
+    }
+    mindMapDropTargetRef.current = hint;
+    if (hint) {
+      const className = hint.placement === 'child' ? 'mindmap-drop-target' : `mindmap-drop-${hint.placement}`;
+      viewportRef.current?.querySelector(`[data-node-id="${hint.targetId}"]`)?.classList.add(className);
+    }
+  }, []);
+
   /* ── Resize a card's DOM element directly ── */
   const resizeCardDOM = useCallback((nodeId: string, x: number, y: number, w: number, h: number) => {
     const el = viewportRef.current?.querySelector(`[data-node-id="${nodeId}"]`) as HTMLElement | null;
@@ -988,6 +1171,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
 
     /* Left click on empty canvas → deselect + selection box */
     if (e.button === 0 && (target === viewportRef.current || target.classList.contains('canvas-content') || target.classList.contains('canvas-grid'))) {
+      if (editingRef.current) finishTextEditing(true);
       setSelected(null);
       setSelectedEdge(null);
       setEditing(null);
@@ -1002,11 +1186,22 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
       selectBoxRef.current = { startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     }
-  }, [screenToCanvas]);
+  }, [finishTextEditing, screenToCanvas]);
 
   /* ── Pointer move (global, captured) ── */
   const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const mode = modeRef.current;
+    let mode = modeRef.current;
+
+    if (mode === 'press-node' && dragInfoRef.current) {
+      if (!hasExceededMindMapDragThreshold(
+        dragInfoRef.current.startX,
+        dragInfoRef.current.startY,
+        e.clientX,
+        e.clientY,
+      )) return;
+      modeRef.current = 'drag';
+      mode = 'drag';
+    }
 
     if (mode === 'pan' && panStartRef.current) {
       const dx = e.clientX - panStartRef.current.mouseX;
@@ -1041,6 +1236,25 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         return n;
       });
       nodesRef.current = newNodes;
+      if (canvasModeRef.current === 'mindmap') {
+        const pointer = screenToCanvas(e.clientX, e.clientY);
+        const draggedId = dragInfoRef.current.nodeId;
+        const target = mindMapDragTargetsRef.current.find((node) => node.id !== draggedId
+          && pointer.x >= node.x && pointer.x <= node.x + node.width
+          && pointer.y >= node.y && pointer.y <= node.y + node.height
+        );
+        if (!target) {
+          setMindMapDropTarget(null);
+        } else {
+          const targetParentId = getMindMapParentId(target.id, nodesRef.current, edgesRef.current);
+          const placement = getMindMapDropPlacement(pointer.y, target.y, target.height, Boolean(targetParentId));
+          const candidateParentId = placement === 'child' ? target.id : targetParentId;
+          setMindMapDropTarget(candidateParentId
+            && canReparentMindMapNode(draggedId, candidateParentId, nodesRef.current, edgesRef.current)
+            ? { targetId: target.id, placement }
+            : null);
+        }
+      }
       return;
     }
 
@@ -1116,16 +1330,79 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         selectEl.style.height = (maxY - minY) + 'px';
       }
     }
-  }, [applyTransform, screenToCanvas, moveCardDOM, resizeCardDOM, updateTempLine]);
+  }, [applyTransform, screenToCanvas, moveCardDOM, resizeCardDOM, setMindMapDropTarget, updateTempLine]);
 
   /* ── Pointer up ── */
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const mode = modeRef.current;
 
+    if (mode === 'press-node') {
+      dragInfoRef.current = null;
+      mindMapDragTargetsRef.current = [];
+      interactionStartSnapshotRef.current = null;
+      modeRef.current = 'idle';
+      return;
+    }
+
     if (mode === 'pan') {
       setPan({ ...panRef.current });
       modeRef.current = 'idle';
       if (viewportRef.current) viewportRef.current.style.cursor = '';
+      return;
+    }
+
+    if (mode === 'drag' && canvasModeRef.current === 'mindmap') {
+      const draggedId = dragInfoRef.current?.nodeId || null;
+      const dropHint = mindMapDropTargetRef.current;
+      setMindMapDropTarget(null);
+      let nextNodes = [...nodesRef.current];
+      let nextEdges = [...edgesRef.current];
+      if (draggedId && dropHint) {
+        const targetId = dropHint.targetId;
+        const targetNode = nextNodes.find((node) => node.id === targetId);
+        const targetParentId = getMindMapParentId(targetId, nextNodes, nextEdges);
+        const parentId = dropHint.placement === 'child' ? targetId : targetParentId;
+        if (parentId && canReparentMindMapNode(draggedId, parentId, nextNodes, nextEdges)) {
+          const parentNode = nextNodes.find((node) => node.id === parentId);
+          const targetSide = getMindMapBranchSide(
+            dropHint.placement === 'child' ? parentId : targetId,
+            nextNodes,
+            nextEdges,
+          ) || (screenToCanvas(e.clientX, e.clientY).x < (parentNode ? parentNode.x + parentNode.width / 2 : 0) ? 'left' : 'right');
+          const oldIncoming = nextEdges.find((edge) => edge.toNode === draggedId);
+          nextEdges = nextEdges.filter((edge) => edge.toNode !== draggedId);
+          const newEdge: CanvasEdge = {
+            id: oldIncoming?.id || `mindmap_${parentId}_${draggedId}_${uid()}`,
+            fromNode: parentId,
+            toNode: draggedId,
+            fromSide: targetSide,
+            toSide: targetSide === 'left' ? 'right' : 'left',
+          };
+          if (dropHint.placement === 'child') {
+            nextEdges.push(newEdge);
+          } else {
+            const targetEdgeIndex = nextEdges.findIndex((edge) => edge.toNode === targetId);
+            const insertIndex = targetEdgeIndex < 0
+              ? nextEdges.length
+              : targetEdgeIndex + (dropHint.placement === 'after' ? 1 : 0);
+            nextEdges.splice(insertIndex, 0, newEdge);
+          }
+          nextNodes = nextNodes.map((node) => node.id === draggedId
+          ? { ...node, branchSide: targetSide }
+            : node.id === parentId && node.collapsed ? { ...node, collapsed: false } : node);
+        }
+      }
+      nextEdges = sanitizeMindMapEdges(nextNodes, nextEdges);
+      nextNodes = layoutMindMapNodes(nextNodes, nextEdges);
+      nextEdges = normalizeMindMapEdges(nextEdges, nextNodes);
+      saveCanvas(nextNodes, nextEdges, {
+        historySnapshot: interactionStartSnapshotRef.current,
+        immediate: true,
+      });
+      interactionStartSnapshotRef.current = null;
+      dragInfoRef.current = null;
+      mindMapDragTargetsRef.current = [];
+      modeRef.current = 'idle';
       return;
     }
 
@@ -1135,6 +1412,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         immediate: true,
       });
       interactionStartSnapshotRef.current = null;
+      mindMapDragTargetsRef.current = [];
       modeRef.current = 'idle';
       return;
     }
@@ -1180,13 +1458,24 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     }
 
     modeRef.current = 'idle';
-  }, [screenToCanvas, saveCanvas, removeTempLine]);
+  }, [removeTempLine, saveCanvas, screenToCanvas, setMindMapDropTarget]);
 
-  /* ── Zoom (wheel) with smooth center-point zoom ── */
+  /* ── Trackpad-style pan; Ctrl/Cmd + wheel zooms around the pointer ── */
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect) return;
+
+    if (!e.ctrlKey && !e.metaKey) {
+      panRef.current = {
+        x: panRef.current.x - (e.shiftKey && Math.abs(e.deltaX) < 1 ? e.deltaY : e.deltaX),
+        y: panRef.current.y - (e.shiftKey ? 0 : e.deltaY),
+      };
+      applyTransform();
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = requestAnimationFrame(() => setPan({ ...panRef.current }));
+      return;
+    }
 
     const factor = e.deltaY > 0 ? (1 - ZOOM_STEP) : (1 + ZOOM_STEP);
     const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current * factor));
@@ -1237,8 +1526,10 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     const node = nodesRef.current.find(n => n.id === nodeId);
     if (!node) return;
 
-    /* If not in multi-select, clear it */
-    if (!multiSelectRef.current.has(nodeId)) {
+    if (editingRef.current && editingRef.current !== nodeId) finishTextEditing(true);
+
+    /* Structured maps use one primary selection; free canvas keeps multi-select. */
+    if (canvasModeRef.current === 'mindmap' || !multiSelectRef.current.has(nodeId)) {
       multiSelectRef.current.clear();
     }
     multiSelectRef.current.add(nodeId);
@@ -1250,14 +1541,24 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     setEditing(null);
     editingRef.current = null;
 
-    modeRef.current = 'drag';
+    modeRef.current = 'press-node';
     interactionStartSnapshotRef.current = makeSnapshot();
+    if (canvasModeRef.current === 'mindmap') {
+      const visibleIds = getMindMapVisibleNodeIds(nodesRef.current, edgesRef.current);
+      const unavailableIds = getMindMapDescendantIds(nodeId, nodesRef.current, edgesRef.current);
+      unavailableIds.add(nodeId);
+      mindMapDragTargetsRef.current = nodesRef.current.filter((candidate) => (
+        visibleIds.has(candidate.id) && !unavailableIds.has(candidate.id)
+      ));
+    } else {
+      mindMapDragTargetsRef.current = [];
+    }
     dragInfoRef.current = {
       nodeId, startX: e.clientX, startY: e.clientY,
       nodeX: node.x, nodeY: node.y,
     };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }, [makeSnapshot]);
+  }, [finishTextEditing, makeSnapshot]);
 
   const startResize = useCallback((e: React.PointerEvent, nodeId: string, direction: ResizeDirection) => {
     e.stopPropagation();
@@ -1302,19 +1603,26 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
       return;
     }
     if (node?.type === 'text') {
-      setEditing(nodeId);
-      editingRef.current = nodeId;
+      beginTextEditing(nodeId);
     }
-  }, [onOpenFile]);
+  }, [beginTextEditing, onOpenFile]);
 
   const handleTextEdit = useCallback((nodeId: string, text: string) => {
-    const newNodes = nodesRef.current.map(n => n.id === nodeId ? { ...n, text } : n);
+    const newNodes = nodesRef.current.map((node) => {
+      if (node.id !== nodeId) return node;
+      if (canvasModeRef.current !== 'mindmap') return { ...node, text };
+      const size = mindMapNodeSize(text, !getMindMapParentId(nodeId, nodesRef.current, edgesRef.current));
+      return {
+        ...node,
+        text,
+        width: size.width,
+        height: size.height,
+      };
+    });
+    setNodes(newNodes);
     nodesRef.current = newNodes;
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      onChange(JSON.stringify({ layoutVersion: CANVAS_LAYOUT_VERSION, nodes: newNodes, edges: edgesRef.current }));
-    }, 400);
-  }, [onChange]);
+    persistCanvas(newNodes, edgesRef.current);
+  }, [persistCanvas]);
 
   /* ── Toolbar actions ── */
   const getActiveSelection = useCallback(() => {
@@ -1545,7 +1853,13 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
   }, [saveCanvas]);
 
   const fitToContent = useCallback(() => {
-    if (nodesRef.current.length === 0) {
+    const visibleIds = canvasModeRef.current === 'mindmap'
+      ? getMindMapVisibleNodeIds(nodesRef.current, edgesRef.current)
+      : null;
+    const fitNodes = visibleIds
+      ? nodesRef.current.filter((node) => visibleIds.has(node.id))
+      : nodesRef.current;
+    if (fitNodes.length === 0) {
       setZoom(1); zoomRef.current = 1;
       setPan({ x: 0, y: 0 }); panRef.current = { x: 0, y: 0 };
       applyTransform();
@@ -1553,7 +1867,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     }
     const padding = 80;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of nodesRef.current) {
+    for (const n of fitNodes) {
       minX = Math.min(minX, n.x);
       minY = Math.min(minY, n.y);
       maxX = Math.max(maxX, n.x + n.width);
@@ -1563,7 +1877,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     if (!rect) return;
     const contentW = maxX - minX + padding * 2;
     const contentH = maxY - minY + padding * 2;
-    const newZoom = Math.min(2, Math.min(rect.width / contentW, rect.height / contentH));
+    const newZoom = Math.max(MIN_ZOOM, Math.min(2, Math.min(rect.width / contentW, rect.height / contentH)));
     const newPan = {
       x: (rect.width - contentW * newZoom) / 2 - (minX - padding) * newZoom,
       y: (rect.height - contentH * newZoom) / 2 - (minY - padding) * newZoom,
@@ -1573,11 +1887,459 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     applyTransform();
   }, [applyTransform]);
 
+  const revealMindMapNode = useCallback((nodeId: string, center = false) => {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!node || !rect) return;
+    const margin = 88;
+    const left = panRef.current.x + node.x * zoomRef.current;
+    const top = panRef.current.y + node.y * zoomRef.current;
+    const right = left + node.width * zoomRef.current;
+    const bottom = top + node.height * zoomRef.current;
+    let nextX = panRef.current.x;
+    let nextY = panRef.current.y;
+    if (center) {
+      nextX = rect.width / 2 - (node.x + node.width / 2) * zoomRef.current;
+      nextY = rect.height / 2 - (node.y + node.height / 2) * zoomRef.current;
+    } else {
+      if (left < margin) nextX += margin - left;
+      else if (right > rect.width - margin) nextX -= right - (rect.width - margin);
+      if (top < margin) nextY += margin - top;
+      else if (bottom > rect.height - margin) nextY -= bottom - (rect.height - margin);
+    }
+    if (nextX === panRef.current.x && nextY === panRef.current.y) return;
+    const nextPan = { x: nextX, y: nextY };
+    panRef.current = nextPan;
+    setPan(nextPan);
+    applyTransform();
+  }, [applyTransform]);
+
+  const selectMindMapNode = useCallback((nodeId: string, center = false) => {
+    if (!nodesRef.current.some((node) => node.id === nodeId)) return;
+    if (editingRef.current) finishTextEditing(true);
+    multiSelectRef.current.clear();
+    multiSelectRef.current.add(nodeId);
+    setSelected(nodeId);
+    selectedRef.current = nodeId;
+    setSelectedEdge(null);
+    selectedEdgeRef.current = null;
+    requestAnimationFrame(() => revealMindMapNode(nodeId, center));
+  }, [finishTextEditing, revealMindMapNode]);
+
+  useEffect(() => {
+    if (canvasMode !== 'mindmap' || nodes.length === 0) return;
+    const key = `${fileName || 'canvas'}:${canvasMode}`;
+    if (lastMindMapAutoFitKeyRef.current === key) return;
+    lastMindMapAutoFitKeyRef.current = key;
+    const frame = requestAnimationFrame(() => fitToContent());
+    return () => cancelAnimationFrame(frame);
+  }, [canvasMode, fileName, fitToContent, nodes.length]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || canvasMode !== 'mindmap' || typeof ResizeObserver === 'undefined') return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (selectedRef.current) revealMindMapNode(selectedRef.current);
+      });
+    });
+    observer.observe(viewport);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [canvasMode, revealMindMapNode]);
+
   const autoLayoutCanvas = useCallback(() => {
+    if (canvasModeRef.current === 'mindmap') {
+      const contentSizedNodes = sizeMindMapNodesToContent(nodesRef.current, edgesRef.current);
+      const safeEdges = sanitizeMindMapEdges(contentSizedNodes, edgesRef.current);
+      const newNodes = layoutMindMapNodes(contentSizedNodes, safeEdges);
+      const newEdges = normalizeMindMapEdges(safeEdges, newNodes);
+      saveCanvas(newNodes, newEdges);
+      return;
+    }
     const selectedIds = getActiveSelection();
     const newNodes = layoutCanvasNodesByEdges(nodesRef.current, edgesRef.current, selectedIds);
     saveCanvas(newNodes, edgesRef.current);
   }, [getActiveSelection, saveCanvas]);
+
+  const selectAndEditNode = useCallback((nodeId: string) => {
+    beginTextEditing(nodeId);
+    requestAnimationFrame(() => revealMindMapNode(nodeId));
+  }, [beginTextEditing, revealMindMapNode]);
+
+  const addMindMapNode = useCallback((relationship: 'child' | 'sibling', preferredSide?: 'left' | 'right') => {
+    const selectedId = selectedRef.current;
+    let selectedNode = selectedId ? nodesRef.current.find((node) => node.id === selectedId) : null;
+    if (!selectedNode && nodesRef.current.length > 0) {
+      const firstRootId = getMindMapRootIds(nodesRef.current, edgesRef.current)[0];
+      selectedNode = nodesRef.current.find((node) => node.id === firstRootId) || null;
+    }
+    const selectedParentId = selectedNode
+      ? getMindMapParentId(selectedNode.id, nodesRef.current, edgesRef.current)
+      : null;
+    const parentId = relationship === 'child'
+      ? selectedNode?.id || null
+      : selectedNode ? selectedParentId || selectedNode.id : null;
+    const anchorNode = parentId ? nodesRef.current.find((node) => node.id === parentId) : selectedNode;
+    const selectedSide = selectedNode
+      ? getMindMapBranchSide(selectedNode.id, nodesRef.current, edgesRef.current)
+      : null;
+    const rootChildren = parentId && !getMindMapParentId(parentId, nodesRef.current, edgesRef.current)
+      ? getMindMapChildrenIds(parentId, nodesRef.current, edgesRef.current)
+      : [];
+    const rightCount = rootChildren.filter((id) => getMindMapBranchSide(id, nodesRef.current, edgesRef.current) === 'right').length;
+    const leftCount = rootChildren.filter((id) => getMindMapBranchSide(id, nodesRef.current, edgesRef.current) === 'left').length;
+    const branchSide = preferredSide || selectedSide || (rightCount <= leftCount ? 'right' : 'left');
+    const newNode: CanvasNode = {
+      id: uid(),
+      type: 'text',
+      x: (anchorNode?.x || 80) + (anchorNode?.width || DEFAULT_CARD_W) + 120,
+      y: (anchorNode?.y || 80) + 120,
+      width: 280,
+      height: 86,
+      text: parentId ? (relationship === 'child' ? '新子主题' : '新主题') : '中心主题',
+      color: parentId ? undefined : '6',
+      branchSide: parentId ? branchSide : undefined,
+    };
+    const nextNodes = nodesRef.current
+      .map((node) => node.id === parentId && node.collapsed ? { ...node, collapsed: false } : node)
+      .concat(newNode);
+    const rawEdges = sanitizeMindMapEdges(nextNodes, parentId
+      ? [...edgesRef.current, {
+        id: `mindmap_${parentId}_${newNode.id}`,
+        fromNode: parentId,
+        fromSide: branchSide,
+        toNode: newNode.id,
+        toSide: branchSide === 'left' ? 'right' : 'left',
+      } as CanvasEdge]
+      : edgesRef.current);
+    const laidOut = layoutMindMapNodes(nextNodes, rawEdges);
+    const nextEdges = normalizeMindMapEdges(rawEdges, laidOut);
+    saveCanvas(laidOut, nextEdges);
+    selectAndEditNode(newNode.id);
+  }, [saveCanvas, selectAndEditNode]);
+
+  const toggleMindMapBranch = useCallback((nodeId: string | null) => {
+    if (!nodeId || getMindMapChildCount(nodeId, nodesRef.current, edgesRef.current) === 0) return;
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    const willCollapse = !node?.collapsed;
+    const descendants = willCollapse
+      ? getMindMapDescendantIds(nodeId, nodesRef.current, edgesRef.current)
+      : new Set<string>();
+    const nextNodes = nodesRef.current.map((node) => node.id === nodeId
+      ? { ...node, collapsed: !node.collapsed }
+      : node);
+    const safeEdges = sanitizeMindMapEdges(nextNodes, edgesRef.current);
+    const laidOut = layoutMindMapNodes(nextNodes, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    if (selectedRef.current && descendants.has(selectedRef.current)) selectMindMapNode(nodeId);
+    else requestAnimationFrame(() => revealMindMapNode(nodeId));
+  }, [revealMindMapNode, saveCanvas, selectMindMapNode]);
+
+  const deleteMindMapBranch = useCallback((nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return;
+    const parentId = getMindMapParentId(nodeId, nodesRef.current, edgesRef.current);
+    const toDelete = getMindMapDescendantIds(nodeId, nodesRef.current, edgesRef.current);
+    toDelete.add(nodeId);
+    const nextNodes = nodesRef.current.filter((node) => !toDelete.has(node.id));
+    const safeEdges = sanitizeMindMapEdges(
+      nextNodes,
+      edgesRef.current.filter((edge) => !toDelete.has(edge.fromNode) && !toDelete.has(edge.toNode)),
+    );
+    const laidOut = layoutMindMapNodes(nextNodes, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    const fallbackId = parentId && nextNodes.some((node) => node.id === parentId)
+      ? parentId
+      : getMindMapRootIds(nextNodes, safeEdges)[0] || null;
+    if (fallbackId) selectMindMapNode(fallbackId);
+    else {
+      multiSelectRef.current.clear();
+      setSelected(null);
+      selectedRef.current = null;
+    }
+  }, [saveCanvas, selectMindMapNode]);
+
+  const deleteMindMapNodePreserveChildren = useCallback((nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return;
+    const parentId = getMindMapParentId(nodeId, nodesRef.current, edgesRef.current);
+    const childIds = getMindMapChildrenIds(nodeId, nodesRef.current, edgesRef.current);
+    const nextNodes = nodesRef.current.filter((node) => node.id !== nodeId);
+    let nextEdges = edgesRef.current.filter((edge) => edge.fromNode !== nodeId && edge.toNode !== nodeId);
+    if (parentId) {
+      const parentSide = getMindMapBranchSide(nodeId, nodesRef.current, edgesRef.current) || 'right';
+      const originalIncomingIndex = edgesRef.current.findIndex((edge) => edge.toNode === nodeId);
+      const promotedEdges = childIds.map((childId) => ({
+        id: `mindmap_${parentId}_${childId}_${uid()}`,
+        fromNode: parentId,
+        toNode: childId,
+        fromSide: parentSide,
+        toSide: parentSide === 'left' ? 'right' as const : 'left' as const,
+      }));
+      nextEdges.splice(Math.min(Math.max(0, originalIncomingIndex), nextEdges.length), 0, ...promotedEdges);
+    }
+    const safeEdges = sanitizeMindMapEdges(nextNodes, nextEdges);
+    const laidOut = layoutMindMapNodes(nextNodes, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    const fallbackId = parentId || childIds[0] || getMindMapRootIds(nextNodes, safeEdges)[0] || null;
+    if (fallbackId) selectMindMapNode(fallbackId);
+    else {
+      setSelected(null);
+      selectedRef.current = null;
+    }
+  }, [saveCanvas, selectMindMapNode]);
+
+  const duplicateMindMapBranch = useCallback((nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return;
+    const parentId = getMindMapParentId(nodeId, nodesRef.current, edgesRef.current);
+    if (!parentId) return;
+    const branchIds = getMindMapDescendantIds(nodeId, nodesRef.current, edgesRef.current);
+    branchIds.add(nodeId);
+    const idMap = new Map<string, string>();
+    for (const id of branchIds) idMap.set(id, uid());
+    const copiedNodes = nodesRef.current
+      .filter((node) => branchIds.has(node.id))
+      .map((node) => ({ ...node, id: idMap.get(node.id)! }));
+    const copiedEdges = edgesRef.current
+      .filter((edge) => branchIds.has(edge.fromNode) && branchIds.has(edge.toNode))
+      .map((edge) => ({
+        ...edge,
+        id: uid(),
+        fromNode: idMap.get(edge.fromNode)!,
+        toNode: idMap.get(edge.toNode)!,
+      }));
+    const copiedRootId = idMap.get(nodeId)!;
+    const side = getMindMapBranchSide(nodeId, nodesRef.current, edgesRef.current) || 'right';
+    const incomingEdge: CanvasEdge = {
+      id: `mindmap_${parentId}_${copiedRootId}_${uid()}`,
+      fromNode: parentId,
+      toNode: copiedRootId,
+      fromSide: side,
+      toSide: side === 'left' ? 'right' : 'left',
+    };
+    const originalIncomingIndex = edgesRef.current.findIndex((edge) => edge.toNode === nodeId);
+    const nextEdges = [...edgesRef.current];
+    nextEdges.splice(originalIncomingIndex < 0 ? nextEdges.length : originalIncomingIndex + 1, 0, incomingEdge);
+    nextEdges.push(...copiedEdges);
+    const nextNodes = [...nodesRef.current, ...copiedNodes];
+    const safeEdges = sanitizeMindMapEdges(nextNodes, nextEdges);
+    const laidOut = layoutMindMapNodes(nextNodes, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    selectMindMapNode(copiedRootId);
+  }, [saveCanvas, selectMindMapNode]);
+
+  const promoteMindMapNode = useCallback((nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return false;
+    const parentId = getMindMapParentId(nodeId, nodesRef.current, edgesRef.current);
+    const grandParentId = parentId
+      ? getMindMapParentId(parentId, nodesRef.current, edgesRef.current)
+      : null;
+    if (!parentId || !grandParentId) return false;
+    const side = getMindMapBranchSide(parentId, nodesRef.current, edgesRef.current) || 'right';
+    const oldIncoming = edgesRef.current.find((edge) => edge.toNode === nodeId);
+    const nextEdges = edgesRef.current.filter((edge) => edge.toNode !== nodeId);
+    const parentIncomingIndex = nextEdges.findIndex((edge) => edge.toNode === parentId);
+    const insertIndex = parentIncomingIndex < 0
+      ? nextEdges.length
+      : Math.min(parentIncomingIndex + 1, nextEdges.length);
+    nextEdges.splice(insertIndex, 0, {
+      id: oldIncoming?.id || `mindmap_${grandParentId}_${nodeId}_${uid()}`,
+      fromNode: grandParentId,
+      toNode: nodeId,
+      fromSide: side,
+      toSide: side === 'left' ? 'right' : 'left',
+    });
+    const safeEdges = sanitizeMindMapEdges(nodesRef.current, nextEdges);
+    const laidOut = layoutMindMapNodes(nodesRef.current, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    selectMindMapNode(nodeId);
+    return true;
+  }, [saveCanvas, selectMindMapNode]);
+
+  const resolveMindMapPasteSide = useCallback((parentId: string): 'left' | 'right' => {
+    const parentParentId = getMindMapParentId(parentId, nodesRef.current, edgesRef.current);
+    if (parentParentId) return getMindMapBranchSide(parentId, nodesRef.current, edgesRef.current) || 'right';
+    const children = getMindMapChildrenIds(parentId, nodesRef.current, edgesRef.current);
+    const leftCount = children.filter((id) => getMindMapBranchSide(id, nodesRef.current, edgesRef.current) === 'left').length;
+    const rightCount = children.length - leftCount;
+    return rightCount <= leftCount ? 'right' : 'left';
+  }, []);
+
+  const copyMindMapBranch = useCallback(async (cut = false, nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) {
+      showMindMapNotice('请先选择一个主题');
+      return;
+    }
+    if (cut && !getMindMapParentId(nodeId, nodesRef.current, edgesRef.current)) {
+      showMindMapNotice('中心主题不能剪切');
+      return;
+    }
+    const snapshot = createMindMapBranchSnapshot(nodeId, nodesRef.current, edgesRef.current);
+    if (!snapshot) return;
+    const plainText = formatMindMapBranchOutline(snapshot);
+    sharedMindMapClipboard = { snapshot, plainText };
+    try {
+      await navigator.clipboard?.writeText(plainText);
+    } catch {
+      // The in-app clipboard remains available when system permission is denied.
+    }
+    showMindMapNotice(`${cut ? '已剪切' : '已复制'} ${snapshot.nodes.length} 个主题`);
+    if (cut) deleteMindMapBranch(nodeId);
+  }, [deleteMindMapBranch, showMindMapNotice]);
+
+  const pasteMindMapBranch = useCallback(async () => {
+    const targetId = selectedRef.current
+      || getMindMapRootIds(nodesRef.current, edgesRef.current)[0]
+      || null;
+    if (!targetId) {
+      showMindMapNotice('请先创建中心主题');
+      return;
+    }
+
+    let systemText = '';
+    try {
+      systemText = await navigator.clipboard?.readText() || '';
+    } catch {
+      // Fall back to the in-app structured clipboard.
+    }
+    const useStructuredClipboard = Boolean(
+      sharedMindMapClipboard
+      && (!systemText.trim() || systemText === sharedMindMapClipboard.plainText),
+    );
+    const side = resolveMindMapPasteSide(targetId);
+    let addedNodes: CanvasNode[] = [];
+    let addedEdges: CanvasEdge[] = [];
+    let pastedRootId = '';
+
+    if (useStructuredClipboard && sharedMindMapClipboard) {
+      const cloned = cloneMindMapBranch(sharedMindMapClipboard.snapshot, uid);
+      pastedRootId = cloned.rootId;
+      addedNodes = cloned.nodes.map((node) => node.id === pastedRootId
+        ? { ...node, branchSide: side }
+        : node);
+      addedEdges = [{
+        id: `mindmap_${targetId}_${pastedRootId}_${uid()}`,
+        fromNode: targetId,
+        toNode: pastedRootId,
+        fromSide: side,
+        toSide: side === 'left' ? 'right' : 'left',
+      }, ...cloned.edges];
+    } else {
+      const outlineItems = parseMindMapOutline(systemText);
+      if (outlineItems.length === 0) {
+        showMindMapNotice('剪贴板中没有可粘贴的主题');
+        return;
+      }
+      const parentAtDepth = new Map<number, string>();
+      for (const item of outlineItems) {
+        const nodeId = uid();
+        const parentId = item.depth === 0 ? targetId : parentAtDepth.get(item.depth - 1) || targetId;
+        const size = mindMapNodeSize(item.text);
+        addedNodes.push({
+          id: nodeId,
+          type: 'text',
+          x: 0,
+          y: 0,
+          width: size.width,
+          height: size.height,
+          text: item.text,
+          branchSide: side,
+        });
+        addedEdges.push({
+          id: `mindmap_${parentId}_${nodeId}_${uid()}`,
+          fromNode: parentId,
+          toNode: nodeId,
+          fromSide: side,
+          toSide: side === 'left' ? 'right' : 'left',
+        });
+        parentAtDepth.set(item.depth, nodeId);
+        for (const depth of [...parentAtDepth.keys()]) {
+          if (depth > item.depth) parentAtDepth.delete(depth);
+        }
+        if (!pastedRootId) pastedRootId = nodeId;
+      }
+    }
+
+    const nextNodes = nodesRef.current
+      .map((node) => node.id === targetId && node.collapsed ? { ...node, collapsed: false } : node)
+      .concat(addedNodes);
+    const safeEdges = sanitizeMindMapEdges(nextNodes, [...edgesRef.current, ...addedEdges]);
+    const laidOut = layoutMindMapNodes(nextNodes, safeEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut));
+    selectMindMapNode(pastedRootId);
+    showMindMapNotice(`已粘贴 ${addedNodes.length} 个主题`);
+  }, [resolveMindMapPasteSide, saveCanvas, selectMindMapNode, showMindMapNotice]);
+
+  const reorderMindMapSibling = useCallback((direction: -1 | 1, nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return;
+    const reorderedEdges = reorderMindMapSiblingEdges(nodeId, direction, nodesRef.current, edgesRef.current);
+    if (reorderedEdges === edgesRef.current) {
+      showMindMapNotice(direction < 0 ? '已经是当前分支第一项' : '已经是当前分支最后一项');
+      return;
+    }
+    const laidOut = layoutMindMapNodes(nodesRef.current, reorderedEdges);
+    saveCanvas(laidOut, normalizeMindMapEdges(reorderedEdges, laidOut));
+    selectMindMapNode(nodeId);
+  }, [saveCanvas, selectMindMapNode, showMindMapNotice]);
+
+  const moveMindMapBranchSide = useCallback((side: 'left' | 'right', nodeId: string | null = selectedRef.current) => {
+    if (!nodeId) return;
+    const parentId = getMindMapParentId(nodeId, nodesRef.current, edgesRef.current);
+    if (!parentId || getMindMapParentId(parentId, nodesRef.current, edgesRef.current)) {
+      showMindMapNotice('只有一级分支可以直接切换左右侧');
+      return;
+    }
+    if (getMindMapBranchSide(nodeId, nodesRef.current, edgesRef.current) === side) return;
+    const nextNodes = nodesRef.current.map((node) => node.id === nodeId ? { ...node, branchSide: side } : node);
+    const laidOut = layoutMindMapNodes(nextNodes, edgesRef.current);
+    saveCanvas(laidOut, normalizeMindMapEdges(edgesRef.current, laidOut));
+    selectMindMapNode(nodeId);
+    showMindMapNotice(`分支已移到${side === 'left' ? '左' : '右'}侧`);
+  }, [saveCanvas, selectMindMapNode, showMindMapNotice]);
+
+  const changeCanvasMode = useCallback((nextMode: MindMapCanvasMode) => {
+    if (canvasModeRef.current === nextMode) return;
+    const historySnapshot = makeSnapshot();
+    canvasModeRef.current = nextMode;
+    setCanvasMode(nextMode);
+    if (nextMode === 'free') lastMindMapAutoFitKeyRef.current = '';
+    let nextNodes = cloneNodes(nodesRef.current);
+    let nextEdges = cloneEdges(edgesRef.current);
+    if (nextMode === 'mindmap') {
+      setQualityPanelOpen(false);
+      if (nextNodes.filter((node) => node.type !== 'group').length === 0) {
+        nextNodes.push({
+          id: uid(),
+          type: 'text',
+          x: 120,
+          y: 120,
+          width: 300,
+          height: 92,
+          text: '中心主题',
+          color: '6',
+        });
+      }
+      nextNodes = sizeMindMapNodesToContent(nextNodes, nextEdges);
+      nextEdges = sanitizeMindMapEdges(nextNodes, nextEdges);
+      nextNodes = layoutMindMapNodes(nextNodes, nextEdges);
+      nextEdges = normalizeMindMapEdges(nextEdges, nextNodes);
+    }
+    saveCanvas(nextNodes, nextEdges, { historySnapshot, immediate: true });
+  }, [makeSnapshot, saveCanvas]);
+
+  const openMindMapSearch = useCallback(() => {
+    setMindMapHelpOpen(false);
+    setMindMapSearchOpen(true);
+    requestAnimationFrame(() => mindMapSearchInputRef.current?.focus());
+  }, []);
+
+  const closeMindMapSearch = useCallback(() => {
+    setMindMapSearchOpen(false);
+    setMindMapSearchIndex(0);
+  }, []);
 
   /* ── Keyboard shortcuts ── */
   useEffect(() => {
@@ -1595,6 +2357,88 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         redoCanvas();
         return;
       }
+      if (canvasModeRef.current === 'mindmap' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        openMindMapSearch();
+        return;
+      }
+      if (mindMapSearchOpen && e.key === 'Escape') {
+        e.preventDefault();
+        closeMindMapSearch();
+        return;
+      }
+      if (mindMapHelpOpen && e.key === 'Escape') {
+        e.preventDefault();
+        setMindMapHelpOpen(false);
+        return;
+      }
+      const target = e.target as HTMLElement;
+      const isTextInput = target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.isContentEditable;
+      if (canvasModeRef.current === 'mindmap' && !isTextInput && (e.ctrlKey || e.metaKey)) {
+        const key = e.key.toLowerCase();
+        if (key === 'c' && selectedRef.current) {
+          e.preventDefault();
+          void copyMindMapBranch(false);
+          return;
+        }
+        if (key === 'x' && selectedRef.current) {
+          e.preventDefault();
+          void copyMindMapBranch(true);
+          return;
+        }
+        if (key === 'v') {
+          e.preventDefault();
+          void pasteMindMapBranch();
+          return;
+        }
+      }
+      if (canvasModeRef.current === 'mindmap' && !isTextInput && e.altKey && !e.ctrlKey && !e.metaKey && selectedRef.current) {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          reorderMindMapSibling(e.key === 'ArrowUp' ? -1 : 1);
+          return;
+        }
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          moveMindMapBranchSide(e.key === 'ArrowLeft' ? 'left' : 'right');
+          return;
+        }
+      }
+      if (canvasModeRef.current === 'mindmap' && !isTextInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          if (e.shiftKey) promoteMindMapNode();
+          else addMindMapNode('child');
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addMindMapNode('sibling');
+          return;
+        }
+        if (e.key === 'F2' && selectedRef.current) {
+          e.preventDefault();
+          beginTextEditing(selectedRef.current);
+          return;
+        }
+        if (e.key === ' ' && selectedRef.current) {
+          e.preventDefault();
+          toggleMindMapBranch(selectedRef.current);
+          return;
+        }
+        if (selectedRef.current && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          const direction = e.key.replace('Arrow', '').toLowerCase() as 'up' | 'down' | 'left' | 'right';
+          const nextId = getMindMapNavigationTarget(
+            selectedRef.current,
+            direction,
+            nodesRef.current,
+            edgesRef.current,
+          );
+          if (nextId) selectMindMapNode(nextId);
+          return;
+        }
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (editingRef.current) return;
         if ((e.target as HTMLElement)?.tagName === 'TEXTAREA' || (e.target as HTMLElement)?.tagName === 'INPUT') return;
@@ -1603,26 +2447,34 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
           return;
         }
         if (!selectedRef.current) return;
-        deleteSelectedNodes();
+        if (canvasModeRef.current === 'mindmap') {
+          e.preventDefault();
+          if (e.altKey) deleteMindMapNodePreserveChildren();
+          else deleteMindMapBranch();
+        } else deleteSelectedNodes();
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
         if (editingRef.current || !selectedRef.current) return;
         if ((e.target as HTMLElement)?.tagName === 'TEXTAREA' || (e.target as HTMLElement)?.tagName === 'INPUT') return;
         e.preventDefault();
-        duplicateSelectedNodes();
+        if (canvasModeRef.current === 'mindmap') duplicateMindMapBranch();
+        else duplicateSelectedNodes();
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         onSave?.();
       }
       if (e.key === 'Escape') {
-        setEditing(null); editingRef.current = null;
+        if (editingRef.current) {
+          finishTextEditing(false);
+          return;
+        }
         setSelected(null); selectedRef.current = null;
         setSelectedEdge(null); selectedEdgeRef.current = null;
         multiSelectRef.current.clear();
       }
       /* Arrow keys to nudge selected cards */
-      if (selectedRef.current && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      if (canvasModeRef.current === 'free' && selectedRef.current && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
         if (editingRef.current) return;
         if ((e.target as HTMLElement)?.tagName === 'TEXTAREA' || (e.target as HTMLElement)?.tagName === 'INPUT') return;
         e.preventDefault();
@@ -1638,12 +2490,13 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [deleteSelectedEdge, deleteSelectedNodes, duplicateSelectedNodes, onSave, redoCanvas, saveCanvas, undoCanvas]);
+  }, [addMindMapNode, beginTextEditing, closeMindMapSearch, copyMindMapBranch, deleteMindMapBranch, deleteMindMapNodePreserveChildren, deleteSelectedEdge, deleteSelectedNodes, duplicateMindMapBranch, duplicateSelectedNodes, finishTextEditing, mindMapHelpOpen, mindMapSearchOpen, moveMindMapBranchSide, onSave, openMindMapSearch, pasteMindMapBranch, promoteMindMapNode, redoCanvas, reorderMindMapSibling, saveCanvas, selectMindMapNode, toggleMindMapBranch, undoCanvas]);
 
   /* ── Cleanup ── */
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (mindMapNoticeTimerRef.current) clearTimeout(mindMapNoticeTimerRef.current);
       cancelAnimationFrame(animFrameRef.current);
     };
   }, []);
@@ -1654,11 +2507,86 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
     return { border: CARD_COLORS[node.color], bg: COLOR_BG[node.color] };
   }, []);
 
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const mindMapIndexData = useMemo(() => canvasMode === 'mindmap'
+    ? createMindMapIndex(nodes, edges)
+    : null, [canvasMode, edges, nodes]);
+  const visibleNodeIds = useMemo(() => mindMapIndexData?.visibleNodeIds
+    || new Set(nodes.map((node) => node.id)), [mindMapIndexData, nodes]);
+  const deferredMindMapSearchQuery = useDeferredValue(mindMapSearchQuery.trim().toLocaleLowerCase());
+  const mindMapSearchMatches = useMemo(() => {
+    if (canvasMode !== 'mindmap' || !deferredMindMapSearchQuery) return [] as CanvasNode[];
+    return nodes.filter((node) => String(node.text || node.file || '')
+      .toLocaleLowerCase()
+      .includes(deferredMindMapSearchQuery));
+  }, [canvasMode, deferredMindMapSearchQuery, nodes]);
+  const mindMapOutlineRows = useMemo(() => {
+    if (!mindMapIndexData) return [] as Array<{ id: string; depth: number }>;
+    const rows: Array<{ id: string; depth: number }> = [];
+    const visited = new Set<string>();
+    const visit = (id: string, depth: number) => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      rows.push({ id, depth });
+      const node = nodeById.get(id);
+      if (!node?.collapsed) {
+        for (const childId of mindMapIndexData.childrenById.get(id) || []) visit(childId, depth + 1);
+      }
+    };
+    for (const rootId of mindMapIndexData.roots) visit(rootId, 0);
+    return rows;
+  }, [mindMapIndexData, nodeById]);
+
+  const focusMindMapNode = useCallback((nodeId: string) => {
+    selectMindMapNode(nodeId, true);
+  }, [selectMindMapNode]);
+
+  const revealMindMapSearchResult = useCallback((nodeId: string) => {
+    const ancestorIds = new Set(getMindMapAncestorIds(nodeId, nodesRef.current, edgesRef.current));
+    const needsExpansion = nodesRef.current.some((node) => ancestorIds.has(node.id) && node.collapsed);
+    if (needsExpansion) {
+      const expandedNodes = nodesRef.current.map((node) => ancestorIds.has(node.id) && node.collapsed
+        ? { ...node, collapsed: false }
+        : node);
+      const safeEdges = sanitizeMindMapEdges(expandedNodes, edgesRef.current);
+      const laidOut = layoutMindMapNodes(expandedNodes, safeEdges);
+      saveCanvas(laidOut, normalizeMindMapEdges(safeEdges, laidOut), {
+        history: false,
+        immediate: true,
+        preserveRedo: true,
+      });
+    }
+    requestAnimationFrame(() => selectMindMapNode(nodeId, true));
+  }, [saveCanvas, selectMindMapNode]);
+
+  const stepMindMapSearch = useCallback((direction: 1 | -1) => {
+    if (mindMapSearchMatches.length === 0) return;
+    setMindMapSearchIndex((current) => (
+      (current + direction + mindMapSearchMatches.length) % mindMapSearchMatches.length
+    ));
+  }, [mindMapSearchMatches.length]);
+
+  useEffect(() => {
+    setMindMapSearchIndex(0);
+  }, [deferredMindMapSearchQuery]);
+
+  const activeMindMapSearchId = mindMapSearchMatches[mindMapSearchIndex]?.id || null;
+  const mindMapSearchMatchIds = useMemo(
+    () => new Set(mindMapSearchMatches.map((node) => node.id)),
+    [mindMapSearchMatches],
+  );
+
+  useEffect(() => {
+    if (!mindMapSearchOpen || !activeMindMapSearchId) return;
+    revealMindMapSearchResult(activeMindMapSearchId);
+  }, [activeMindMapSearchId, mindMapSearchOpen, revealMindMapSearchResult]);
+
   /* ── Memoized edges SVG ── */
   const edgesSvg = useMemo(() => {
     return edges.map(edge => {
-      const from = nodes.find(n => n.id === edge.fromNode);
-      const to = nodes.find(n => n.id === edge.toNode);
+      if (!visibleNodeIds.has(edge.fromNode) || !visibleNodeIds.has(edge.toNode)) return null;
+      const from = nodeById.get(edge.fromNode);
+      const to = nodeById.get(edge.toNode);
       if (!from || !to) return null;
       const sides = edge.fromSide ? { fs: edge.fromSide, ts: edge.toSide || 'left' } : autoSides(from, to);
       const d = edgePath(from, to, sides.fs, sides.ts);
@@ -1667,7 +2595,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
       const labelY = (from.y + from.height / 2 + to.y + to.height / 2) / 2;
       const stroke = edge.color ? CARD_COLORS[edge.color] || '#7c5cff' : '#7c5cff';
       return (
-        <g key={edge.id} className={`canvas-edge${isSelectedEdge ? ' selected' : ''}`}>
+        <g key={edge.id} className={`canvas-edge${isSelectedEdge ? ' selected' : ''}${canvasMode === 'mindmap' ? ' mindmap-edge' : ''}`}>
           <path
             className="canvas-edge-hit"
             d={d}
@@ -1685,9 +2613,9 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
             d={d}
             fill="none"
             stroke={stroke}
-            strokeWidth={isSelectedEdge ? 3 : 1.7}
-            opacity={isSelectedEdge ? 0.95 : 0.65}
-            markerEnd="url(#arrowhead)"
+            strokeWidth={isSelectedEdge ? 3 : canvasMode === 'mindmap' ? 2.2 : 1.7}
+            opacity={isSelectedEdge ? 0.95 : canvasMode === 'mindmap' ? 0.82 : 0.65}
+            markerEnd={canvasMode === 'mindmap' ? undefined : 'url(#arrowhead)'}
           />
           {edge.label && (
             <text
@@ -1703,13 +2631,13 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         </g>
       );
     });
-  }, [nodes, edges, openContextMenu, selectEdge, selectedEdge]);
+  }, [canvasMode, edges, nodeById, openContextMenu, selectEdge, selectedEdge, visibleNodeIds]);
 
-  const selectedNode = selected ? nodes.find(node => node.id === selected) || null : null;
+  const selectedNode = selected ? nodeById.get(selected) || null : null;
   const selectedEdgeObj = selectedEdge ? edges.find(edge => edge.id === selectedEdge) || null : null;
-  const selectedEdgeFrom = selectedEdgeObj ? nodes.find(node => node.id === selectedEdgeObj.fromNode) || null : null;
-  const selectedEdgeTo = selectedEdgeObj ? nodes.find(node => node.id === selectedEdgeObj.toNode) || null : null;
-  const contextNode = contextMenu?.nodeId ? nodes.find(node => node.id === contextMenu.nodeId) || null : null;
+  const selectedEdgeFrom = selectedEdgeObj ? nodeById.get(selectedEdgeObj.fromNode) || null : null;
+  const selectedEdgeTo = selectedEdgeObj ? nodeById.get(selectedEdgeObj.toNode) || null : null;
+  const contextNode = contextMenu?.nodeId ? nodeById.get(contextMenu.nodeId) || null : null;
   const canUndo = historyTick >= 0 && undoStackRef.current.length > 0;
   const canRedo = historyTick >= 0 && redoStackRef.current.length > 0;
   const canvasQuality = useMemo(() => analyzeCanvasQualityForDisplay(nodes, edges), [nodes, edges]);
@@ -1719,7 +2647,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
      ═══════════════════════════════════════════════════════ */
 
   return (
-    <div className="canvas-editor">
+    <div className={`canvas-editor canvas-mode-${canvasMode}`}>
       {/* Title bar */}
       <div className="editor-titlebar">
         <span className="editor-titlebar-name">
@@ -1727,7 +2655,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
           {fileName || 'Canvas'}
         </span>
         <span className="editor-titlebar-right" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {nodes.length} cards · {edges.length} links
+          {canvasMode === 'mindmap' ? '思维导图' : '自由画布'} · {visibleNodeIds.size} 个节点 · {edges.length} 条连接
         </span>
       </div>
 
@@ -1740,42 +2668,110 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
           Redo
         </button>
         <div className="canvas-tool-sep" />
-        <button className="canvas-tool-btn" title="添加文本卡片 (双击空白处)" onClick={addTextCard}>
-          <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+        <div className="canvas-mode-switch" role="tablist" aria-label="画布模式">
+          <button type="button" role="tab" aria-selected={canvasMode === 'free'} className={canvasMode === 'free' ? 'active' : ''} onClick={() => changeCanvasMode('free')}>
+            自由画布
+          </button>
+          <button type="button" role="tab" aria-selected={canvasMode === 'mindmap'} className={canvasMode === 'mindmap' ? 'active' : ''} onClick={() => changeCanvasMode('mindmap')}>
+            思维导图
+          </button>
+        </div>
+        <div className="canvas-tool-sep" />
+        {canvasMode === 'mindmap' ? (
+          <>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加子主题 (Tab)" onClick={() => addMindMapNode('child')}>
+              + 子主题
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加同级主题 (Enter)" onClick={() => addMindMapNode('sibling')}>
+              + 同级
+            </button>
+            <button
+              className="canvas-tool-btn canvas-tool-btn-wide"
+              title="折叠或展开当前分支 (Space)"
+              onClick={() => toggleMindMapBranch(selectedRef.current)}
+              disabled={!selectedNode || (mindMapIndexData?.childrenById.get(selectedNode.id)?.length || 0) === 0}
+            >
+              {selectedNode?.collapsed ? '展开' : '折叠'}
+            </button>
+            <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapOutlineOpen ? ' active' : ''}`} title="打开或关闭导图大纲" onClick={() => setMindMapOutlineOpen((open) => !open)}>
+              大纲
+            </button>
+            <button className={`canvas-tool-btn canvas-tool-btn-wide${mindMapSearchOpen ? ' active' : ''}`} title="搜索主题 (Ctrl+F)" onClick={openMindMapSearch}>
+              搜索
+            </button>
+            <button
+              className={`canvas-tool-btn${mindMapHelpOpen ? ' active' : ''}`}
+              title="思维导图快捷键"
+              aria-label="打开思维导图快捷键帮助"
+              aria-expanded={mindMapHelpOpen}
+              onClick={() => {
+                setMindMapSearchOpen(false);
+                setMindMapHelpOpen((open) => !open);
+              }}
+            >?</button>
+          </>
+        ) : (
+          <>
+            <button className="canvas-tool-btn" title="添加文本卡片（双击空白处）" onClick={addTextCard}>
+              <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+            </button>
+            <button className="canvas-tool-btn" title="添加文件卡片" onClick={addFileCard}>
+              <span style={{ fontSize: 13 }}>F</span>
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="添加分组框" onClick={addGroupCard}>
+              分组
+            </button>
+          </>
+        )}
+        {canvasMode === 'mindmap' ? (
+          <>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="复制整个分支 (Ctrl+C)" onClick={() => void copyMindMapBranch(false)} disabled={!selected}>
+              复制
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="粘贴为当前主题的子分支 (Ctrl+V)" onClick={() => void pasteMindMapBranch()} disabled={nodes.length === 0}>
+              粘贴
+            </button>
+            <button className="canvas-tool-btn" title="同级上移 (Alt+↑)" onClick={() => reorderMindMapSibling(-1)} disabled={!selected} aria-label="同级上移">↑</button>
+            <button className="canvas-tool-btn" title="同级下移 (Alt+↓)" onClick={() => reorderMindMapSibling(1)} disabled={!selected} aria-label="同级下移">↓</button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="删除整个分支 (Delete)" onClick={() => deleteMindMapBranch()} disabled={!selected}>
+              删除
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Duplicate selected cards (Ctrl+D)" onClick={duplicateSelectedNodes} disabled={!selected}>
+              Duplicate
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Delete selection" onClick={() => selectedEdge ? deleteSelectedEdge() : deleteSelectedNodes()} disabled={!selected && !selectedEdge}>
+              Delete
+            </button>
+          </>
+        )}
+        <button className="canvas-tool-btn canvas-tool-btn-wide" title={canvasMode === 'mindmap' ? '一键整理导图' : '自动排列卡片'} onClick={autoLayoutCanvas} disabled={nodes.length === 0}>
+          {canvasMode === 'mindmap' ? '整理' : '布局'}
         </button>
-        <button className="canvas-tool-btn" title="添加文件卡片" onClick={addFileCard}>
-          <span style={{ fontSize: 13 }}>📄</span>
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Add group frame" onClick={addGroupCard}>
-          Group
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Duplicate selected cards (Ctrl+D)" onClick={duplicateSelectedNodes} disabled={!selected}>
-          Duplicate
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Delete selection" onClick={() => selectedEdge ? deleteSelectedEdge() : deleteSelectedNodes()} disabled={!selected && !selectedEdge}>
-          Delete
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Auto layout cards" onClick={autoLayoutCanvas} disabled={nodes.length === 0}>
-          Layout
-        </button>
-        <button
-          className={`canvas-quality-chip canvas-quality-${canvasQuality.level}`}
-          title={canvasQuality.tooltip}
-          onClick={() => setQualityPanelOpen(open => !open)}
-          disabled={nodes.length === 0}
-          aria-expanded={qualityPanelOpen}
-          aria-controls="canvas-quality-panel"
-        >
-          <span className="canvas-quality-dot" />
-          <span>Quality {canvasQuality.score}</span>
-          {canvasQuality.issueCount > 0 && <span className="canvas-quality-issues">{canvasQuality.issueCount}</span>}
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Fit selected text card" onClick={() => fitTextNodeToContent(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
-          Fit
-        </button>
-        <button className="canvas-tool-btn canvas-tool-btn-wide" title="Split selected long text card" onClick={() => splitTextNodeIntoReadableCards(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
-          Split
-        </button>
+        {canvasMode === 'free' && (
+          <>
+            <button
+              className={`canvas-quality-chip canvas-quality-${canvasQuality.level}`}
+              title={canvasQuality.tooltip}
+              onClick={() => setQualityPanelOpen(open => !open)}
+              disabled={nodes.length === 0}
+              aria-expanded={qualityPanelOpen}
+              aria-controls="canvas-quality-panel"
+            >
+              <span className="canvas-quality-dot" />
+              <span>Quality {canvasQuality.score}</span>
+              {canvasQuality.issueCount > 0 && <span className="canvas-quality-issues">{canvasQuality.issueCount}</span>}
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Fit selected text card" onClick={() => fitTextNodeToContent(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
+              Fit
+            </button>
+            <button className="canvas-tool-btn canvas-tool-btn-wide" title="Split selected long text card" onClick={() => splitTextNodeIntoReadableCards(selectedRef.current)} disabled={!selectedNode || selectedNode.type !== 'text'}>
+              Split
+            </button>
+          </>
+        )}
         <div className="canvas-tool-sep" />
         <button className="canvas-tool-btn" title="缩小" onClick={() => {
           const z = Math.max(MIN_ZOOM, zoomRef.current * (1 - ZOOM_STEP));
@@ -1801,11 +2797,68 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         </button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          双击创建 · Alt+拖拽平移 · 滚轮缩放 · 方向键微调
+          {canvasMode === 'mindmap'
+            ? '方向键导航 · Tab 子主题 · Enter 同级 · Shift+Tab 提升 · Esc 取消编辑'
+            : '双击创建 · 滚轮平移 · Ctrl+滚轮缩放 · Alt 拖动画布'}
         </span>
       </div>
 
-      {qualityPanelOpen && nodes.length > 0 && (
+      {canvasMode === 'mindmap' && mindMapSearchOpen && (
+        <div className="canvas-mindmap-search" role="search" aria-label="搜索思维导图主题">
+          <span className="canvas-mindmap-search-icon" aria-hidden="true">⌕</span>
+          <input
+            ref={mindMapSearchInputRef}
+            value={mindMapSearchQuery}
+            onChange={(event) => setMindMapSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                stepMindMapSearch(event.shiftKey ? -1 : 1);
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                closeMindMapSearch();
+              }
+            }}
+            placeholder="搜索主题内容..."
+            aria-label="搜索主题内容"
+          />
+          <span className="canvas-mindmap-search-count" aria-live="polite">
+            {mindMapSearchQuery.trim()
+              ? `${mindMapSearchMatches.length ? Math.min(mindMapSearchIndex + 1, mindMapSearchMatches.length) : 0}/${mindMapSearchMatches.length}`
+              : `${nodes.length} 个主题`}
+          </span>
+          <button type="button" title="上一个 (Shift+Enter)" disabled={mindMapSearchMatches.length === 0} onClick={() => stepMindMapSearch(-1)}>↑</button>
+          <button type="button" title="下一个 (Enter)" disabled={mindMapSearchMatches.length === 0} onClick={() => stepMindMapSearch(1)}>↓</button>
+          <button type="button" title="关闭 (Esc)" onClick={closeMindMapSearch}>×</button>
+        </div>
+      )}
+
+      {canvasMode === 'mindmap' && mindMapHelpOpen && (
+        <aside className="canvas-mindmap-help" role="dialog" aria-label="思维导图快捷键">
+          <header>
+            <div>
+              <strong>快捷操作</strong>
+              <span>保持双手在键盘上完成建图</span>
+            </div>
+            <button type="button" aria-label="关闭快捷键帮助" onClick={() => setMindMapHelpOpen(false)}>×</button>
+          </header>
+          <div className="canvas-mindmap-help-list">
+            {MIND_MAP_SHORTCUTS.map(([keys, label]) => (
+              <div key={keys}>
+                <span>{label}</span>
+                <kbd>{keys}</kbd>
+              </div>
+            ))}
+          </div>
+        </aside>
+      )}
+
+      {canvasMode === 'mindmap' && mindMapNotice && (
+        <div className="canvas-mindmap-notice" role="status" aria-live="polite">{mindMapNotice}</div>
+      )}
+
+      {canvasMode === 'free' && qualityPanelOpen && nodes.length > 0 && (
         <div
           id="canvas-quality-panel"
           className={`canvas-quality-panel canvas-quality-panel-${canvasQuality.level}`}
@@ -1876,6 +2929,43 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
         </div>
       )}
 
+      {canvasMode === 'mindmap' && mindMapOutlineOpen && (
+        <aside className="canvas-mindmap-outline" aria-label="思维导图大纲">
+          <div className="canvas-mindmap-outline-head">
+            <div>
+              <span>导图大纲</span>
+              <small>{mindMapOutlineRows.length} 个主题</small>
+            </div>
+            <button type="button" aria-label="关闭导图大纲" onClick={() => setMindMapOutlineOpen(false)}>×</button>
+          </div>
+          <div className="canvas-mindmap-outline-list">
+            {mindMapOutlineRows.map(({ id, depth }) => {
+              const node = nodeById.get(id);
+              if (!node) return null;
+              const childCount = mindMapIndexData?.childrenById.get(id)?.length || 0;
+              return (
+                <div
+                  key={id}
+                  className={`canvas-mindmap-outline-row${selected === id ? ' active' : ''}`}
+                  style={{ paddingLeft: 12 + depth * 17 }}
+                >
+                  <button
+                    type="button"
+                    className="canvas-mindmap-outline-mark"
+                    disabled={childCount === 0}
+                    aria-label={childCount > 0 ? (node.collapsed ? '展开分支' : '折叠分支') : '无子主题'}
+                    onClick={() => toggleMindMapBranch(id)}
+                  >{childCount > 0 ? (node.collapsed ? '›' : '⌄') : '·'}</button>
+                  <button type="button" onClick={() => focusMindMapNode(id)}>
+                    {String(node.text || node.file || '未命名主题').replace(/^#+\s*/, '').split('\n')[0]}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </aside>
+      )}
+
       {/* Canvas viewport */}
       <div
         ref={viewportRef}
@@ -1911,23 +3001,38 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
           </svg>
 
           {/* Cards */}
-          {nodes.map(node => {
+          {nodes.filter((node) => visibleNodeIds.has(node.id)).map(node => {
             const colors = getCardColor(node);
             const isSelected = selected === node.id || multiSelectRef.current.has(node.id);
             const isEditing = editing === node.id;
+            const isMindMapRoot = canvasMode === 'mindmap' && !mindMapIndexData?.parentById.has(node.id);
+            const mindMapSide = mindMapIndexData?.branchSideById.get(node.id) || null;
+            const mindMapChildCount = mindMapIndexData?.childrenById.get(node.id)?.length || 0;
+            const isSearchMatch = mindMapSearchMatchIds.has(node.id);
+            const isActiveSearchMatch = activeMindMapSearchId === node.id;
             return (
               <div
                 key={node.id}
                 data-node-id={node.id}
-                className={`canvas-card${isSelected ? ' selected' : ''}${node.type === 'group' ? ' group-card' : ''}`}
+                role={canvasMode === 'mindmap' ? 'button' : undefined}
+                tabIndex={canvasMode === 'mindmap' ? 0 : undefined}
+                aria-label={canvasMode === 'mindmap' ? String(node.text || node.file || '未命名主题').split('\n')[0] : undefined}
+                aria-pressed={canvasMode === 'mindmap' ? isSelected : undefined}
+                aria-expanded={canvasMode === 'mindmap' && mindMapChildCount > 0 ? !node.collapsed : undefined}
+                className={`canvas-card${isSelected ? ' selected' : ''}${node.type === 'group' ? ' group-card' : ''}${canvasMode === 'mindmap' ? ' mindmap-card' : ''}${isMindMapRoot ? ' mindmap-root' : ''}${isSearchMatch ? ' mindmap-search-match' : ''}${isActiveSearchMatch ? ' mindmap-search-active' : ''}`}
                 style={{
                   left: node.x, top: node.y,
                   width: node.width, height: node.height,
                   borderColor: isSelected ? '#7c5cff' : colors.border,
-                  backgroundColor: node.type === 'group' ? 'transparent' : colors.bg,
+                  backgroundColor: node.type === 'group' || isMindMapRoot ? undefined : colors.bg,
                   willChange: 'transform',
                 }}
                 onPointerDown={(e) => startDrag(e, node.id)}
+                onFocus={(e) => {
+                  if (canvasMode === 'mindmap' && e.target === e.currentTarget && selectedRef.current !== node.id) {
+                    selectMindMapNode(node.id);
+                  }
+                }}
                 onDoubleClick={(e) => handleCardDoubleClick(e, node.id)}
                 onContextMenu={(e) => openContextMenu(e, node.id)}
               >
@@ -1963,6 +3068,32 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
                       autoFocus
                       placeholder="输入内容..."
                       onPointerDown={(e) => e.stopPropagation()}
+                      onBlur={() => {
+                        if (editingRef.current === node.id) finishTextEditing(true);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          finishTextEditing(false);
+                          return;
+                        }
+                        if (canvasMode === 'mindmap' && e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          finishTextEditing(true);
+                          promoteMindMapNode(node.id);
+                          requestAnimationFrame(() => beginTextEditing(node.id));
+                          return;
+                        }
+                        if (canvasMode !== 'mindmap' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+                        if (e.key === 'Enter' || e.key === 'Tab') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          finishTextEditing(true);
+                          addMindMapNode(e.key === 'Tab' ? 'child' : 'sibling');
+                        }
+                      }}
                     />
                   ) : (
                     <div className="canvas-card-content"
@@ -1971,8 +3102,56 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
                   )
                 )}
 
+                {canvasMode === 'mindmap' && mindMapChildCount > 0 && (
+                  <button
+                    type="button"
+                    className={`canvas-mindmap-collapse side-${mindMapSide || 'right'}`}
+                    title={node.collapsed ? '展开分支' : '折叠分支'}
+                    aria-label={node.collapsed ? '展开分支' : '折叠分支'}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleMindMapBranch(node.id);
+                    }}
+                  >
+                    {node.collapsed ? mindMapChildCount : '−'}
+                  </button>
+                )}
+
+                {canvasMode === 'mindmap' && !isEditing && (
+                  isMindMapRoot ? (
+                    <>
+                      <button
+                        type="button"
+                        className="canvas-mindmap-add side-left"
+                        title="在左侧添加分支"
+                        aria-label="在左侧添加分支"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); selectMindMapNode(node.id); addMindMapNode('child', 'left'); }}
+                      >+</button>
+                      <button
+                        type="button"
+                        className="canvas-mindmap-add side-right"
+                        title="在右侧添加分支"
+                        aria-label="在右侧添加分支"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); selectMindMapNode(node.id); addMindMapNode('child', 'right'); }}
+                      >+</button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`canvas-mindmap-add side-${mindMapSide || 'right'}`}
+                      title="添加子主题"
+                      aria-label="添加子主题"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); selectMindMapNode(node.id); addMindMapNode('child'); }}
+                    >+</button>
+                  )
+                )}
+
                 {/* Connection points */}
-                {['top', 'right', 'bottom', 'left'].map(side => {
+                {canvasMode === 'free' && ['top', 'right', 'bottom', 'left'].map(side => {
                   const pos = {
                     top: { top: -5, left: '50%', transform: 'translateX(-50%)' },
                     bottom: { bottom: -5, left: '50%', transform: 'translateX(-50%)' },
@@ -1987,7 +3166,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
                 })}
 
                 {/* Color dots (shown when selected) */}
-                {isSelected && (
+                {isSelected && canvasMode === 'free' && (
                   <div className="canvas-card-colors">
                     {Object.entries(CARD_COLORS).map(([key, color]) => (
                       <div key={key} className="canvas-color-dot"
@@ -2011,7 +3190,7 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
                 )}
 
                 {/* Resize handles */}
-                {isSelected && RESIZE_HANDLES.map(direction => (
+                {isSelected && canvasMode === 'free' && RESIZE_HANDLES.map(direction => (
                   <div
                     key={direction}
                     className={`canvas-resize-handle handle-${direction}`}
@@ -2021,10 +3200,55 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
               </div>
             );
           })}
+
+          {canvasMode === 'mindmap' && selectedNode && visibleNodeIds.has(selectedNode.id) && (
+            <div
+              className="canvas-mindmap-floating-toolbar"
+              style={{ left: selectedNode.x + selectedNode.width / 2, top: selectedNode.y - 10 }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <button type="button" onClick={() => beginTextEditing(selectedNode.id)}>编辑</button>
+              <button type="button" title="复制整个分支 (Ctrl+C)" onClick={() => void copyMindMapBranch(false, selectedNode.id)}>复制</button>
+              {mindMapIndexData?.parentById.has(selectedNode.id) ? (
+                <>
+                  <button type="button" onClick={() => addMindMapNode('sibling')}>同级</button>
+                  <button type="button" title="同级上移 (Alt+↑)" onClick={() => reorderMindMapSibling(-1, selectedNode.id)}>↑</button>
+                  <button type="button" title="同级下移 (Alt+↓)" onClick={() => reorderMindMapSibling(1, selectedNode.id)}>↓</button>
+                  {!mindMapIndexData.parentById.has(mindMapIndexData.parentById.get(selectedNode.id)!) && (
+                    <button
+                      type="button"
+                      title={mindMapIndexData.branchSideById.get(selectedNode.id) === 'left' ? '移到右侧 (Alt+→)' : '移到左侧 (Alt+←)'}
+                      onClick={() => moveMindMapBranchSide(mindMapIndexData.branchSideById.get(selectedNode.id) === 'left' ? 'right' : 'left', selectedNode.id)}
+                    >{mindMapIndexData.branchSideById.get(selectedNode.id) === 'left' ? '移右' : '移左'}</button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button type="button" onClick={() => addMindMapNode('child', 'left')}>左分支</button>
+                  <button type="button" onClick={() => addMindMapNode('child', 'right')}>右分支</button>
+                </>
+              )}
+              <button type="button" onClick={() => addMindMapNode('child')}>子主题</button>
+              {(mindMapIndexData?.childrenById.get(selectedNode.id)?.length || 0) > 0 && (
+                <button type="button" onClick={() => toggleMindMapBranch(selectedNode.id)}>{selectedNode.collapsed ? '展开' : '折叠'}</button>
+              )}
+              <span className="canvas-mindmap-floating-sep" />
+              {Object.entries(CARD_COLORS).slice(0, 6).map(([key, color]) => (
+                <button
+                  type="button"
+                  key={key}
+                  className="canvas-mindmap-color"
+                  aria-label={`设置颜色 ${key}`}
+                  style={{ background: color }}
+                  onClick={() => updateNode(selectedNode.id, { color: key })}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
-      {selectedNode && (
+      {selectedNode && canvasMode === 'free' && (
         <aside className="canvas-properties-panel" onPointerDown={(e) => e.stopPropagation()}>
           <div className="canvas-properties-header">
             <div>
@@ -2182,20 +3406,36 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
             </>
           ) : contextMenu.nodeId ? (
             <>
-              <button onClick={() => { duplicateSelectedNodes(); closeContextMenu(); }}>Duplicate</button>
-              <button onClick={() => { reorderSelectedNodes('front'); closeContextMenu(); }}>Bring to front</button>
-              <button onClick={() => { reorderSelectedNodes('back'); closeContextMenu(); }}>Send to back</button>
+              {(canvasMode === 'free' || getMindMapParentId(contextMenu.nodeId, nodes, edges)) && (
+                <button onClick={() => {
+                  if (canvasMode === 'mindmap') duplicateMindMapBranch(contextMenu.nodeId);
+                  else duplicateSelectedNodes();
+                  closeContextMenu();
+                }}>{canvasMode === 'mindmap' ? '复制整个分支' : 'Duplicate'}</button>
+              )}
+              {canvasMode === 'free' && (
+                <>
+                  <button onClick={() => { reorderSelectedNodes('front'); closeContextMenu(); }}>Bring to front</button>
+                  <button onClick={() => { reorderSelectedNodes('back'); closeContextMenu(); }}>Send to back</button>
+                </>
+              )}
               <button onClick={() => {
                 const node = nodesRef.current.find(n => n.id === contextMenu.nodeId);
-                if (node?.type === 'text') {
-                  setEditing(node.id);
-                  editingRef.current = node.id;
-                }
+                if (node?.type === 'text') beginTextEditing(node.id);
                 closeContextMenu();
               }}>
-                Edit
+                {canvasMode === 'mindmap' ? '编辑主题' : 'Edit'}
               </button>
-              {contextNode?.type === 'text' && (
+              {canvasMode === 'mindmap' && (
+                <>
+                  <button onClick={() => { void copyMindMapBranch(false, contextMenu.nodeId); closeContextMenu(); }}>复制分支</button>
+                  <button onClick={() => { void copyMindMapBranch(true, contextMenu.nodeId); closeContextMenu(); }}>剪切分支</button>
+                  <button onClick={() => { selectMindMapNode(contextMenu.nodeId!); void pasteMindMapBranch(); closeContextMenu(); }}>粘贴为子分支</button>
+                  <button onClick={() => { reorderMindMapSibling(-1, contextMenu.nodeId); closeContextMenu(); }}>同级上移</button>
+                  <button onClick={() => { reorderMindMapSibling(1, contextMenu.nodeId); closeContextMenu(); }}>同级下移</button>
+                </>
+              )}
+              {canvasMode === 'free' && contextNode?.type === 'text' && (
                 <>
                   <button onClick={() => { fitTextNodeToContent(contextMenu.nodeId); closeContextMenu(); }}>Fit text</button>
                   <button onClick={() => { splitTextNodeIntoReadableCards(contextMenu.nodeId); closeContextMenu(); }}>Split long card</button>
@@ -2213,7 +3453,14 @@ export default function CanvasEditor({ content, onChange, onSave, fileName, onOp
                   />
                 ))}
               </div>
-              <button className="danger" onClick={() => { deleteSelectedNodes(); closeContextMenu(); }}>Delete</button>
+              {canvasMode === 'mindmap' ? (
+                <>
+                  <button className="danger" onClick={() => { deleteMindMapBranch(contextMenu.nodeId); closeContextMenu(); }}>删除整个分支</button>
+                  <button onClick={() => { deleteMindMapNodePreserveChildren(contextMenu.nodeId); closeContextMenu(); }}>仅删除此节点并保留子级</button>
+                </>
+              ) : (
+                <button className="danger" onClick={() => { deleteSelectedNodes(); closeContextMenu(); }}>Delete</button>
+              )}
             </>
           ) : (
             <>

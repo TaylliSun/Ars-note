@@ -1,9 +1,9 @@
 /* ── Ars-note Sync Server Types (v0.8.0) ── */
 
-export const SERVER_VERSION = '1.5.64';
+export const SERVER_VERSION = '1.5.67';
 export const SERVER_APP_NAME = 'Ars-note Sync Server';
-export const SERVER_BUILD_ID = 'sync-v4-public-release-20260712-1245';
-export const LIVE_SYNC_SAFETY_CAPABILITY_SCHEMA = 11;
+export const SERVER_BUILD_ID = 'sync-v4-public-security-20260809-01';
+export const LIVE_SYNC_SAFETY_CAPABILITY_SCHEMA = 12;
 export const LIVE_SYNC_TOMBSTONE_RETENTION_DAYS = 30;
 export const REQUIRED_LIVE_SYNC_SAFETY_CAPABILITIES = [
   'livePersistence',
@@ -25,6 +25,11 @@ export const REQUIRED_LIVE_SYNC_SAFETY_CAPABILITIES = [
   'serializedVaultWrites',
   'startupStorageReadiness',
   'metadataOnlySnapshots',
+  'constantTimeAuthentication',
+  'authFailureRateLimit',
+  'apiKeyHeaderOnly',
+  'httpSecurityHeaders',
+  'webSocketProtocolValidation',
 ] as const;
 
 /** Health check response */

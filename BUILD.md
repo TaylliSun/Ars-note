@@ -1,4 +1,4 @@
-# Ars-note v1.5.64 build guide
+# Ars-note v1.5.97 build guide
 
 ## Requirements
 
@@ -42,7 +42,7 @@ npm --prefix server test
 | `npm run dist` | Windows NSIS installer |
 | `npm run release:full` | Versioned desktop, NAS, documentation, manifest, and checksum bundle |
 
-The Windows installer is written to `release/Ars-note-Setup-1.5.64.exe`. A complete release is written to a timestamped `release/ars-note-release-v1.5.64-*` directory.
+The Windows installer is written to `release/Ars-note-Setup-1.5.97.exe`. A complete release is written to a timestamped `release/ars-note-release-v1.5.97-*` directory.
 
 ## Public release requirements
 

@@ -29,7 +29,10 @@ if (!ENDPOINT || !API_KEY) {
 const BASE = ENDPOINT.replace(/\/+$/, '');
 const VAULT_ID = 'smoke-vault-' + Date.now();
 const BACKUP_ID = 'smoke-backup-' + Date.now();
+const SECOND_VAULT_ID = 'smoke-vault-b-' + Date.now();
+const SECOND_BACKUP_ID = 'smoke-backup-b-' + Date.now();
 const TEST_CONTENT = 'Ars-note smoke test content @ ' + new Date().toISOString();
+const SECOND_TEST_CONTENT = 'Second isolated Vault content @ ' + new Date().toISOString();
 const VAULT_NAME = 'Smoke Test Vault';
 
 let passed = 0;
@@ -182,6 +185,54 @@ async function main() {
     assert('Duplicate rejected', data.ok === false, `ok=${data.ok}`);
   } catch (e) {
     assert('Duplicate rejected', false, e.message);
+  }
+
+  /* 13-16. Multiple Vaults stay isolated even when they use the same relative path. */
+  try {
+    const { data } = await apiWithKey('POST', '/api/vaults/register', { vaultId: SECOND_VAULT_ID, vaultName: 'Second Smoke Vault' });
+    assert('Register second vault', data.ok === true && data.serverVaultId, `ok=${data.ok}`);
+  } catch (e) {
+    assert('Register second vault', false, e.message);
+  }
+
+  const secondContentBuffer = Buffer.from(SECOND_TEST_CONTENT);
+  const secondFileSha = crypto.createHash('sha256').update(secondContentBuffer).digest('hex');
+  const secondManifestHash = crypto.createHash('sha256').update('second-smoke-manifest').digest('hex');
+  try {
+    const metadata = await apiWithKey('POST', '/api/backups/upload-metadata', {
+      vaultId: SECOND_VAULT_ID,
+      backupId: SECOND_BACKUP_ID,
+      manifestHash: secondManifestHash,
+      fileCount: 1,
+      totalSize: secondContentBuffer.length,
+      manifest: { files: [{ relativePath: 'smoke-test.md', sha256: secondFileSha, size: secondContentBuffer.length }] },
+    });
+    const file = await apiWithKey('POST', '/api/backups/upload-file', {
+      vaultId: SECOND_VAULT_ID,
+      backupId: SECOND_BACKUP_ID,
+      relativePath: 'smoke-test.md',
+      contentBase64: secondContentBuffer.toString('base64'),
+      sha256: secondFileSha,
+      size: secondContentBuffer.length,
+    });
+    assert('Upload second vault data', metadata.data.ok === true && file.data.ok === true, `metadata=${metadata.data.ok}, file=${file.data.ok}`);
+  } catch (e) {
+    assert('Upload second vault data', false, e.message);
+  }
+
+  try {
+    const { data } = await apiWithKey('GET', `/api/backups/download-file?vaultId=${encodeURIComponent(SECOND_VAULT_ID)}&backupId=${encodeURIComponent(SECOND_BACKUP_ID)}&relativePath=smoke-test.md`);
+    const content = Buffer.from(data.contentBase64 || '', 'base64').toString('utf-8');
+    assert('Second vault round-trip', data.ok === true && content === SECOND_TEST_CONTENT, `match=${content === SECOND_TEST_CONTENT}`);
+  } catch (e) {
+    assert('Second vault round-trip', false, e.message);
+  }
+
+  try {
+    const { data } = await apiWithKey('GET', `/api/backups/download-file?vaultId=${encodeURIComponent(VAULT_ID)}&backupId=${encodeURIComponent(SECOND_BACKUP_ID)}&relativePath=smoke-test.md`);
+    assert('Cross-vault lookup blocked', data.ok === false, `ok=${data.ok}`);
+  } catch (e) {
+    assert('Cross-vault lookup blocked', false, e.message);
   }
 
   /* Summary */

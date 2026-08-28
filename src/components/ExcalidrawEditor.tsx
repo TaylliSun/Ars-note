@@ -2,6 +2,11 @@
 /* Clean integration — zero CSS overrides, let Excalidraw handle everything */
 
 import React, { useEffect, useState, useRef, useCallback, Component, lazy, Suspense } from 'react';
+import {
+  haveExcalidrawElementsChanged,
+  parseExcalidrawDocument,
+  serializeExcalidrawDocument,
+} from '../utils/excalidrawPersistence';
 
 /* ── Error Boundary ── */
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { error: string }> {
@@ -27,70 +32,76 @@ interface Props {
   content: string;
   onChange: (json: string) => void;
   onSave?: () => void;
+  onFlush?: (json: string) => void | Promise<void>;
   vaultPath?: string;
   fileName?: string;
 }
 
 /* ── Component ── */
-export default function ExcalidrawEditor({ content, onChange, onSave, fileName }: Props) {
+export default function ExcalidrawEditor({ content, onChange, onSave, onFlush, fileName }: Props) {
   const apiRef = useRef<any>(null);
   const debounceRef = useRef<any>(null);
+  const pendingSceneRef = useRef<string | null>(null);
   const firstRender = useRef(true);
   const [error, setError] = useState<string | null>(null);
 
   /* Build initialData — memoized once */
   const initialDataRef = useRef<any>(null);
   if (initialDataRef.current === null) {
-    let elements: any[] = [];
-    let appState: any = {};
-    if (content && content.trim()) {
-      try {
-        const parsed = JSON.parse(content);
-        elements = parsed.elements || [];
-        appState = parsed.appState || {};
-      } catch { /* empty file */ }
-    }
-    initialDataRef.current = { elements, appState };
+    initialDataRef.current = parseExcalidrawDocument(content);
   }
 
-  /* onChange: just debounce-save, NO element patching */
-  const handleChange = useCallback((elements: readonly any[], state: any) => {
-    /* Skip the very first onChange (initial render sync) */
+  const commitPendingScene = useCallback(() => {
+    const pending = pendingSceneRef.current;
+    if (!pending) return;
+    pendingSceneRef.current = null;
+    onChange(pending);
+  }, [onChange]);
+
+  /* Keep rapid pointer updates cheap, but never discard the final scene. */
+  const handleChange = useCallback((elements: readonly any[], state: any, files: Record<string, unknown>) => {
     if (firstRender.current) {
       firstRender.current = false;
-      return;
+      if (!haveExcalidrawElementsChanged(initialDataRef.current.elements, elements)) return;
     }
 
+    pendingSceneRef.current = serializeExcalidrawDocument(elements, state, files);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      try {
-        onChange(JSON.stringify({
-          type: 'excalidraw',
-          version: 2,
-          elements: elements as any[],
-          appState: {
-            viewBackgroundColor: state.viewBackgroundColor,
-            theme: state.theme,
-            currentItemStrokeColor: state.currentItemStrokeColor,
-            currentItemBackgroundColor: state.currentItemBackgroundColor,
-          },
-          files: {},
-        }));
-      } catch {}
+      debounceRef.current = null;
+      commitPendingScene();
     }, 250);
-  }, [onChange]);
+  }, [commitPendingScene]);
 
   /* Ctrl+S */
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); onSave?.(); }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+        const pending = pendingSceneRef.current;
+        if (pending) {
+          pendingSceneRef.current = null;
+          onChange(pending);
+          void onFlush?.(pending);
+        } else {
+          onSave?.();
+        }
+      }
     };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [onSave]);
+    window.addEventListener('keydown', h, true);
+    return () => window.removeEventListener('keydown', h, true);
+  }, [onChange, onFlush, onSave]);
 
   /* Cleanup */
-  useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    const pending = pendingSceneRef.current;
+    pendingSceneRef.current = null;
+    if (pending) void onFlush?.(pending);
+  }, [onFlush]);
 
   if (error) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#b0b8cc', flexDirection: 'column', gap: 12 }}>
@@ -120,15 +131,16 @@ export default function ExcalidrawEditor({ content, onChange, onSave, fileName }
                 elements: initialDataRef.current.elements,
                 appState: {
                   ...initialDataRef.current.appState,
-                  viewBackgroundColor: '#1e1e2e',
-                  currentItemStrokeColor: '#e2e8f0',
-                  currentItemBackgroundColor: 'transparent',
-                  currentItemFillStyle: 'hachure',
-                  currentItemFontFamily: 1,
-                  currentItemStrokeWidth: 2,
-                  currentItemRoughness: 1,
-                  currentItemOpacity: 100,
+                  viewBackgroundColor: initialDataRef.current.appState.viewBackgroundColor || '#1e1e2e',
+                  currentItemStrokeColor: initialDataRef.current.appState.currentItemStrokeColor || '#e2e8f0',
+                  currentItemBackgroundColor: initialDataRef.current.appState.currentItemBackgroundColor || 'transparent',
+                  currentItemFillStyle: initialDataRef.current.appState.currentItemFillStyle || 'hachure',
+                  currentItemFontFamily: initialDataRef.current.appState.currentItemFontFamily || 1,
+                  currentItemStrokeWidth: initialDataRef.current.appState.currentItemStrokeWidth || 2,
+                  currentItemRoughness: initialDataRef.current.appState.currentItemRoughness ?? 1,
+                  currentItemOpacity: initialDataRef.current.appState.currentItemOpacity ?? 100,
                 },
+                files: initialDataRef.current.files,
               }}
               onChange={handleChange}
               excalidrawAPI={(api: any) => { apiRef.current = api; }}

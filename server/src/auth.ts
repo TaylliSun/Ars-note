@@ -1,5 +1,6 @@
 /* ── API Key Authentication (v0.8.6) ── */
 
+import * as crypto from 'crypto';
 import type * as http from 'http';
 
 export interface AuthResult {
@@ -15,7 +16,28 @@ const AUTH_OK: AuthResult = { ok: true };
  * Returns undefined if no key is configured (dev mode).
  */
 export function getServerApiKey(): string | undefined {
-  return process.env.ARS_NOTE_SERVER_API_KEY;
+  return process.env.ARS_NOTE_SERVER_API_KEY || undefined;
+}
+
+function secretDigest(value: string): Buffer {
+  return crypto.createHash('sha256').update(value, 'utf8').digest();
+}
+
+/** Compare secrets without leaking matching-prefix or length timing. */
+export function isValidServerApiKey(candidate: unknown): boolean {
+  const configuredKey = getServerApiKey();
+  if (!configuredKey || typeof candidate !== 'string' || !candidate) return false;
+  return crypto.timingSafeEqual(secretDigest(candidate), secretDigest(configuredKey));
+}
+
+export function getRequestApiKey(req: http.IncomingMessage): string {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+    if (match) return match[1];
+  }
+  const customHeader = req.headers['x-ars-note-api-key'];
+  return typeof customHeader === 'string' ? customHeader : '';
 }
 
 /**
@@ -43,20 +65,7 @@ export function requireApiKey(req: http.IncomingMessage): AuthResult {
     return AUTH_OK;
   }
 
-  /* Try Authorization: Bearer <key> */
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader === 'string') {
-    const parts = authHeader.split(' ');
-    if (parts.length === 2 && parts[0] === 'Bearer' && parts[1] === configuredKey) {
-      return AUTH_OK;
-    }
-  }
-
-  /* Try x-ars-note-api-key header */
-  const customHeader = req.headers['x-ars-note-api-key'];
-  if (typeof customHeader === 'string' && customHeader === configuredKey) {
-    return AUTH_OK;
-  }
+  if (isValidServerApiKey(getRequestApiKey(req))) return AUTH_OK;
 
   return {
     ok: false,

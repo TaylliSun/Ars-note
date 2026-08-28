@@ -1,6 +1,6 @@
 # Ars-note self-hosted sync server
 
-Version: 1.5.64
+Version: 1.5.67
 
 The server provides authenticated backup, real-time WebSocket sync, deletion tombstones, stale-write protection, server snapshots, live history, restore, and the administration page. Local filesystem storage is the recommended NAS setup. S3-compatible storage is optional.
 
@@ -53,7 +53,7 @@ In Ars-note, enter only `http://NAS_IP:8787` as the server URL. Do not append `/
 2. Back up or snapshot `sync-data`.
 3. Replace only the mounted `server/dist` directory.
 4. Keep `sync-data` and `.env` unchanged.
-5. Recreate the container and verify `/health` reports version `1.5.64`.
+5. Recreate the container and verify `/health` reports version `1.5.67`.
 6. Update all desktop clients to the matching release before resuming work.
 
 Never initialize an empty `sync-data` directory as an update to a server that already contains the authoritative Vault.
@@ -66,16 +66,19 @@ Never initialize an empty `sync-data` directory as an update to a server that al
 | `ARSNOTE_HOST` | `0.0.0.0` | Container bind address |
 | `ARS_NOTE_SERVER_API_KEY` | Random 32+ characters | Shared client authentication key |
 | `ARS_NOTE_REQUIRE_API_KEY` | `true` | Refuse insecure startup |
+| `ARS_NOTE_MIN_API_KEY_LENGTH` | `32` | Reject weak deployment keys |
+| `ARS_NOTE_SECURITY_MODE` | `lan` or `public` | Enable fail-closed public transport policy |
+| `ARS_NOTE_ALLOW_API_KEY_IN_QUERY` | `false` | Keep credentials out of URLs and proxy logs |
 | `ARS_NOTE_STORAGE_BACKEND` | `local` | NAS filesystem storage |
 | `ARS_NOTE_ALLOW_LEGACY_LIVE_WRITES` | `false` | Block obsolete clients from writing |
 
-The server refuses to start when `ARS_NOTE_REQUIRE_API_KEY=true` and the key is missing or shorter than 16 characters.
+The supplied Compose files refuse to start when the key is missing or shorter than 32 characters. Public mode also requires a trusted HTTPS reverse proxy.
 
 ## Network security
 
 - Do not expose port 8787 directly to the public Internet.
 - Prefer Tailscale or another trusted VPN.
-- If a reverse proxy is required, use HTTPS and preserve WebSocket Upgrade/Connection headers for `/ws/live-sync`.
+- If a reverse proxy is required, follow `PUBLIC_DEPLOYMENT.md`, use HTTPS, and preserve WebSocket Upgrade/Connection headers for `/ws/live-sync`.
 - Restrict access to `/admin` and do not share the API key in screenshots or diagnostics.
 - Rotate keys used by releases earlier than v1.5.64.
 

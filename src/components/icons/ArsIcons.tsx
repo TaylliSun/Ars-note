@@ -65,6 +65,9 @@ export const CollapseIcon = ({ size = defaults.size, className, style, onClick }
 export const GamepadIcon = ({ size = defaults.size, className, style, onClick }: IconProps) =>
   svg(size, className, style, onClick, <><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/><line x1="6" y1="10" x2="6" y2="14"/><line x1="4" y1="12" x2="8" y2="12"/></>);
 
+export const BalanceIcon = ({ size = defaults.size, className, style, onClick }: IconProps) =>
+  svg(size, className, style, onClick, <><path d="M9 2h6"/><path d="M10 2v6l-5.5 9.2A3 3 0 0 0 7.1 22h9.8a3 3 0 0 0 2.6-4.8L14 8V2"/><path d="M7.5 15h9"/><circle cx="10" cy="18" r=".8" fill="currentColor" stroke="none"/><circle cx="14" cy="12" r=".7" fill="currentColor" stroke="none"/></>);
+
 export const GraphIcon = ({ size = defaults.size, className, style, onClick }: IconProps) =>
   svg(size, className, style, onClick, <><circle cx="12" cy="12" r="2"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><line x1="12" y1="12" x2="5" y2="6"/><line x1="12" y1="12" x2="19" y2="6"/><line x1="12" y1="12" x2="5" y2="18"/><line x1="12" y1="12" x2="19" y2="18"/></>);
 

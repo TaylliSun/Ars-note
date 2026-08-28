@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue } from 'react';
 import type { FileNode, VaultConfig, VaultOpenResult, SearchResult, VaultIndex, OutgoingLinkInfo, CandidateFile, GroupedBacklink, TagNoteInfo, GraphData, GraphSummary, VaultManifest, BackupSummary, BackupListItem, BackupFileListResult, BackupFileRestoreSummary, BackupPruneSummary, RestoreSummary, BackupVerifyResult, SyncConfig, RemoteBackupItem, CloudUploadSummary, CloudDownloadSummary, DownloadedBackupItem, ProviderValidationResult, S3RuntimeCredentials, S3CredentialStatus, S3ConnectionTestResult, SyncCompareResult, SyncPreviewResult, SelfHostedRuntimeCredentials, SelfHostedCredentialStatus, GameWorkspaceSummary, GameWorkspaceEntry, GameDocType, GameWorkspaceDashboard, ArshisIntegrationConfig, AIProviderConfig, AIChatMessage, AIContextMode, AIControlMode, AIResponse, AIRuntimeStatus, AIConnectionTestResult, AIContextUsage, AITeamScheduleContext } from './types';
 import { buildGraphData, computeGraphSummary } from './utils/graphBuilder';
 import { resolveWikiLink } from './utils/markdownLinks';
@@ -15,6 +15,11 @@ import { buildExportDocument as buildMarkdownExportDocument, renderMarkdown as r
 import { getAIChatScrollToken } from './utils/aiChatPresentation';
 import { createCoalescedAsyncRunner } from './utils/coalescedAsyncRunner';
 import {
+  createLiveSyncRendererHint,
+  isLiveSyncRendererHintForVault,
+  isSameLiveSyncTarget,
+} from './utils/liveSyncVaultScope';
+import {
   WORKSPACE_SESSION_VERSION,
   migrateWorkspaceSession,
   type WorkspaceSession,
@@ -28,6 +33,7 @@ import NewItemDialog from './components/NewItemDialog';
 import PromptDialog from './components/PromptDialog';
 import ErrorBoundary from './components/ErrorBoundary';
 import AIChatMessageList, { useAIChatAutoScroll } from './components/AIChatMessageList';
+import AIWritingQualityCard from './components/AIWritingQualityCard';
 import type { QuickCommand, QuickFileMeta } from './components/QuickSwitcher';
 import { BotIcon, GraphIcon, FileIcon, ChevronRightIcon, SyncIcon, CloseIcon, MenuIcon, LocateIcon, CopyIcon, ClockIcon } from './components/icons/ArsIcons';
 import { APP_VERSION, APP_VERSION_LABEL } from './appVersion';
@@ -46,6 +52,7 @@ const ExcalidrawEditor = React.lazy(() => import('./components/ExcalidrawEditor'
 const CanvasEditor = React.lazy(() => import('./components/CanvasEditor'));
 const AIFivePillarPanel = React.lazy(() => import('./components/AIFivePillarPanel'));
 const TeamSchedulePanel = React.lazy(() => import('./components/TeamSchedulePanel'));
+const BalanceLab = React.lazy(() => import('./components/BalanceLab'));
 
 const LazyPanelFallback: React.FC<{ label?: string }> = ({ label = '正在加载工作区...' }) => (
   <div className="lazy-panel-fallback" role="status">{label}</div>
@@ -194,22 +201,6 @@ function findFirstMarkdownPath(nodes: FileNode[]): string | null {
 }
 
 const EMPTY_INDEX: VaultIndex = { notes: {}, updatedAt: '' };
-const AI_LIVE_SESSION_RELATIVE_PATH = '.ai-memory/live-session.json';
-
-type AILiveSessionPayload = {
-  kind: 'ars-note.ai-live-session';
-  version: 1;
-  updatedAt: string;
-  updatedAtMs: number;
-  sending: boolean;
-  contextMode: AIContextMode;
-  sourceFile?: string;
-  sourceVaultName?: string;
-  sourceClientId?: string;
-  messages: AIChatMessage[];
-  controlMode?: AIControlMode;
-  liveToolCalls?: import('./types').AIToolCallRecord[];
-};
 
 function resolveVaultRelativeFile(vaultPath: string, relativePath: string): string {
   const cleanVault = vaultPath.replace(/[\\/]+$/, '');
@@ -217,9 +208,14 @@ function resolveVaultRelativeFile(vaultPath: string, relativePath: string): stri
   return cleanVault + separator + relativePath.replace(/\//g, separator);
 }
 
-function normalizeDisplayAIChatMessages(messages: any[]): AIChatMessage[] {
+const MAX_DISPLAYED_AI_HISTORY_MESSAGES = 80;
+
+function normalizeDisplayAIChatMessages(messages: any[], maxMessages = MAX_DISPLAYED_AI_HISTORY_MESSAGES): AIChatMessage[] {
   const chatMsgs: AIChatMessage[] = [];
-  for (const m of messages || []) {
+  const source = Array.isArray(messages) && messages.length > maxMessages
+    ? messages.slice(-maxMessages)
+    : (messages || []);
+  for (const m of source) {
     if (m?.role === 'user' || m?.role === 'assistant' || m?.role === 'system') {
       chatMsgs.push({
         role: m.role,
@@ -303,6 +299,14 @@ function explicitlyWantsCanvas(prompt: string): boolean {
   return /canvas|canva|画布|白板|流程图|思维导图|脑图|看板|关系图|拓扑图|flow\s*chart|mind\s*map|kanban/i.test(prompt);
 }
 
+function shouldInferAIReferencedFiles(prompt: string): boolean {
+  const text = String(prompt || '');
+  const explicitPath = /(?:[A-Za-z]:[\\/][^\r\n]+|(?:[\w\u4e00-\u9fff ._-]+[\\/])+[\w\u4e00-\u9fff ._-]+\.(?:md|json|canvas|excalidraw)|[\w\u4e00-\u9fff ._-]+\.(?:md|json|canvas|excalidraw))/i.test(text);
+  const naturalReference = /(?:这个|那个|当前|刚才|上面|打开的|现有的).{0,12}(?:文件|文档|笔记|原型|画布|白板|界面|UI|canvas|wireframe|prototype)/i.test(text);
+  const namedVisualSource = /(?:UI\s*原型|界面原型|wireframe|mockup|prototype|excalidraw|canvas|画布|白板)/i.test(text);
+  return explicitPath || naturalReference || namedVisualSource;
+}
+
 async function buildAIReferencedFileContext(params: {
   prompt: string;
   vaultPath: string;
@@ -311,15 +315,17 @@ async function buildAIReferencedFileContext(params: {
   fileTree: FileNode[];
 }): Promise<string> {
   const { prompt, vaultPath, currentFile, currentContent, fileTree } = params;
+  if (!shouldInferAIReferencedFiles(prompt)) return '';
   const currentRelPath = currentFile
     ? normalizePath(currentFile.replace(vaultPath, '').replace(/^[\\/]/, ''))
     : '';
   const allFiles = flattenAIContextFiles(fileTree);
   const scored = allFiles
+    .filter(relativePath => normalizePath(relativePath) !== currentRelPath)
     .map(relativePath => ({ relativePath, score: scoreAIReferencedFile(prompt, relativePath, currentRelPath) }))
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+    .slice(0, 2);
 
   if (scored.length === 0) return '';
 
@@ -340,7 +346,7 @@ async function buildAIReferencedFileContext(params: {
     try {
       const fullPath = resolveVaultRelativeFile(vaultPath, item.relativePath);
       const raw = normalizePath(item.relativePath) === currentRelPath ? currentContent : await api.readFile(fullPath);
-      const truncated = raw.length > 14000 ? `${raw.slice(0, 14000)}\n...(truncated)` : raw;
+      const truncated = raw.length > 8000 ? `${raw.slice(0, 8000)}\n...(truncated)` : raw;
       sections.push(`--- Candidate file: ${item.relativePath} (score ${item.score}) ---`);
       sections.push(truncated.trim() ? truncated : '(file is empty)');
     } catch {
@@ -376,6 +382,93 @@ function parseWikiLinksWithAliases(content: string): { target: string; alias: st
   return results;
 }
 
+type DocumentOpeningEventDetail = {
+  path: string;
+  label: string;
+  requestId: number;
+  immediate: boolean;
+};
+
+const DOCUMENT_OPENING_START_EVENT = 'ars-note:document-opening-start';
+const DOCUMENT_OPENING_FINISH_EVENT = 'ars-note:document-opening-finish';
+
+function startDocumentOpening(detail: DocumentOpeningEventDetail) {
+  window.dispatchEvent(new CustomEvent(DOCUMENT_OPENING_START_EVENT, { detail }));
+}
+
+function finishDocumentOpeningEvent(filePath: string) {
+  window.dispatchEvent(new CustomEvent(DOCUMENT_OPENING_FINISH_EVENT, { detail: { path: filePath } }));
+}
+
+const DocumentOpeningOverlay = React.memo(() => {
+  const [current, setCurrent] = useState<DocumentOpeningEventDetail | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const clearTimer = () => {
+      if (!timerRef.current) return;
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
+    const handleStart = (event: Event) => {
+      const detail = (event as CustomEvent<DocumentOpeningEventDetail>).detail;
+      clearTimer();
+      if (detail.immediate) {
+        setCurrent(detail);
+        return;
+      }
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        setCurrent(detail);
+      }, 90);
+    };
+    const handleFinish = (event: Event) => {
+      const filePath = (event as CustomEvent<{ path: string }>).detail.path;
+      clearTimer();
+      setCurrent((value) => (
+        value && normalizePath(value.path).toLowerCase() === normalizePath(filePath).toLowerCase()
+          ? null
+          : value
+      ));
+    };
+
+    window.addEventListener(DOCUMENT_OPENING_START_EVENT, handleStart);
+    window.addEventListener(DOCUMENT_OPENING_FINISH_EVENT, handleFinish);
+    return () => {
+      clearTimer();
+      window.removeEventListener(DOCUMENT_OPENING_START_EVENT, handleStart);
+      window.removeEventListener(DOCUMENT_OPENING_FINISH_EVENT, handleFinish);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!current) return;
+    try {
+      performance.mark('ars-note:document-opening-visible', {
+        detail: { path: current.path, requestId: current.requestId },
+      });
+    } catch { /* Performance diagnostics are optional. */ }
+    const fallbackTimer = setTimeout(() => {
+      setCurrent((value) => value?.requestId === current.requestId ? null : value);
+    }, 8_000);
+    return () => clearTimeout(fallbackTimer);
+  }, [current]);
+
+  if (!current) return null;
+  return (
+    <div className="document-opening-overlay" role="status" aria-live="polite" aria-label={`正在打开 ${current.label}`}>
+      <div className="document-opening-card">
+        <span className="document-opening-spinner" aria-hidden="true" />
+        <span className="document-opening-copy">
+          <strong>正在打开 {current.label}</strong>
+          <span>准备编辑器与实时预览</span>
+        </span>
+        <span className="document-opening-progress" aria-hidden="true"><i /></span>
+      </div>
+    </div>
+  );
+});
+
 const App: React.FC = () => {
   const { t, language } = useI18n();
 
@@ -386,7 +479,15 @@ const App: React.FC = () => {
   const [currentFile, setCurrentFile] = useState<string>('');
   const [bookmarkedFiles, setBookmarkedFiles] = useState<string[]>([]);
   const [currentContent, setCurrentContent] = useState<string>('');
+  const documentOpenRequestRef = useRef(0);
+  const deferredCurrentContent = useDeferredValue(currentContent);
   const [savedContent, setSavedContent] = useState<string>('');
+  const currentFileStateRef = useRef(currentFile);
+  const currentContentStateRef = useRef(currentContent);
+  const savedContentStateRef = useRef(savedContent);
+  currentFileStateRef.current = currentFile;
+  currentContentStateRef.current = currentContent;
+  savedContentStateRef.current = savedContent;
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const [rightTab, setRightTab] = useState<RightTab>('game');
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
@@ -394,6 +495,7 @@ const App: React.FC = () => {
   const [showCenterGraph, setShowCenterGraph] = useState(false);
   const [showCenterAI, setShowCenterAI] = useState(false);
   const [showCenterSchedule, setShowCenterSchedule] = useState(false);
+  const [showBalanceLab, setShowBalanceLab] = useState(false);
   const [aiPanelTab, setAiPanelTab] = useState<'chat' | 'pillars'>('chat');
   const editorRef = useRef<EditorHandle>(null);
   const [viewMode, setViewMode] = useState<'source' | 'preview' | 'split' | 'live'>('live');
@@ -536,7 +638,6 @@ const App: React.FC = () => {
   const [aiSending, setAiSending] = useState(false);
   const [aiRetryPrompt, setAiRetryPrompt] = useState('');
   const activeAIRequestIdRef = useRef<string | null>(null);
-  const [aiRemoteSending, setAiRemoteSending] = useState(false);
   const [aiCopiedResponse, setAiCopiedResponse] = useState(false);
   const [aiHistoryList, setAiHistoryList] = useState<Array<{ file: string; date?: string; savedAt?: string; messageCount?: number }>>([]);
   const [aiShowHistory, setAiShowHistory] = useState(false);
@@ -550,7 +651,7 @@ const App: React.FC = () => {
   const centerAiMessagesRef = useRef<HTMLDivElement | null>(null);
   const centerAIChatScrollToken = getAIChatScrollToken(
     aiChatMessages,
-    `${aiLiveToolCalls.length}:${aiSending ? 'sending' : aiRemoteSending ? 'remote' : 'idle'}`,
+    `${aiLiveToolCalls.length}:${aiSending ? 'sending' : 'idle'}`,
   );
   useAIChatAutoScroll(
     centerAiMessagesRef,
@@ -723,6 +824,7 @@ const App: React.FC = () => {
     setShowCenterGraph(false);
     setShowCenterAI(false);
     setShowCenterSchedule(false);
+    setShowBalanceLab(false);
     setRightTab('settings');
     setSettingsModalOpen(true);
   }, [rightTab, settingsModalOpen]);
@@ -777,7 +879,7 @@ const App: React.FC = () => {
   const settingsNavItem = (section: string, label: string) => (
     <button
       type="button"
-      className={'obsidian-settings-nav-item' + (settingsModalSection === section ? ' active' : '')}
+      className={'ars-settings-nav-item' + (settingsModalSection === section ? ' active' : '')}
       onClick={() => setSettingsModalSection(section)}
     >
       {label}
@@ -839,41 +941,8 @@ const App: React.FC = () => {
       localStorage.setItem('ars-note.backup.keepLatest', String(backupRetentionLimit));
     } catch { /* ignore storage failures */ }
   }, [backupRetentionLimit]);
-  const aiLiveSessionVersionRef = useRef(0);
-  const aiLiveSessionPublishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const suppressAiLiveSessionPublishRef = useRef(false);
   const aiConversationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressAiConversationSaveRef = useRef(false);
-
-  const applyAiLiveSessionPayload = useCallback((payload: AILiveSessionPayload | null): boolean => {
-    if (!payload || payload.kind !== 'ars-note.ai-live-session' || !Array.isArray(payload.messages)) return false;
-
-    const incomingVersion = Number(payload.updatedAtMs || Date.parse(payload.updatedAt || ''));
-    if (!Number.isFinite(incomingVersion) || incomingVersion <= aiLiveSessionVersionRef.current) return false;
-
-    aiLiveSessionVersionRef.current = incomingVersion;
-    suppressAiLiveSessionPublishRef.current = true;
-    suppressAiConversationSaveRef.current = true;
-    setAiChatMessages(normalizeDisplayAIChatMessages(payload.messages));
-    setAiRemoteSending(!!payload.sending);
-    setAiLiveToolCalls(payload.sending ? (payload.liveToolCalls || []) : []);
-    if (payload.contextMode) setAiContextMode(payload.contextMode);
-    if (payload.controlMode === 'readonly' || payload.controlMode === 'member' || payload.controlMode === 'producer') {
-      setAiControlMode(payload.controlMode);
-    }
-    return true;
-  }, []);
-
-  useEffect(() => {
-    if (!vaultPath || !api.readFile) return;
-    const sessionFile = resolveVaultRelativeFile(vaultPath, AI_LIVE_SESSION_RELATIVE_PATH);
-    api.readFile(sessionFile).then((content: string) => {
-      if (!content.trim()) return;
-      let payload: AILiveSessionPayload | null = null;
-      try { payload = JSON.parse(content); } catch { payload = null; }
-      applyAiLiveSessionPayload(payload);
-    }).catch(() => {});
-  }, [vaultPath, applyAiLiveSessionPayload]);
 
   /* Auto-save AI chat messages when they change */
   useEffect(() => {
@@ -898,60 +967,6 @@ const App: React.FC = () => {
     };
   }, [aiChatMessages, vaultPath]);
 
-  /* Live Sync: mirror the currently open AI chat session across devices. */
-  useEffect(() => {
-    if (!vaultPath || !api.liveSyncPushFile) return;
-
-    if (suppressAiLiveSessionPublishRef.current) {
-      suppressAiLiveSessionPublishRef.current = false;
-      return;
-    }
-
-    if (aiChatMessages.length === 0 && !aiSending) return;
-
-    if (aiLiveSessionPublishTimerRef.current) {
-      clearTimeout(aiLiveSessionPublishTimerRef.current);
-    }
-
-    aiLiveSessionPublishTimerRef.current = setTimeout(async () => {
-      aiLiveSessionPublishTimerRef.current = null;
-      const updatedAtMs = Date.now();
-      aiLiveSessionVersionRef.current = updatedAtMs;
-      let sourceClientId = '';
-      try {
-        const status = await api.liveSyncStatus?.();
-        sourceClientId = status?.clientId || '';
-      } catch { /* Live Sync status is optional for session mirroring. */ }
-
-      const payload: AILiveSessionPayload = {
-        kind: 'ars-note.ai-live-session',
-        version: 1,
-        updatedAt: new Date(updatedAtMs).toISOString(),
-        updatedAtMs,
-        sending: aiSending,
-        contextMode: aiContextMode,
-        controlMode: aiControlMode,
-        sourceFile: currentFile || undefined,
-        sourceVaultName: vault?.name,
-        sourceClientId,
-        messages: aiChatMessages,
-        liveToolCalls: aiLiveToolCalls,
-      };
-
-      const sessionFile = resolveVaultRelativeFile(vaultPath, AI_LIVE_SESSION_RELATIVE_PATH);
-      const payloadText = JSON.stringify(payload, null, 2);
-      await api.writeFile?.(sessionFile, payloadText).catch(() => {});
-      api.liveSyncPushFile(sessionFile, payloadText).catch(() => {});
-    }, 120);
-
-    return () => {
-      if (aiLiveSessionPublishTimerRef.current) {
-        clearTimeout(aiLiveSessionPublishTimerRef.current);
-        aiLiveSessionPublishTimerRef.current = null;
-      }
-    };
-  }, [vaultPath, aiChatMessages, aiSending, aiContextMode, aiControlMode, currentFile, vault?.name, aiLiveToolCalls]);
-
   /* Start AI memory auto-sync when vault opens with self-hosted sync (v0.9.6) */
   useEffect(() => {
     if (!vaultPath || !api.aiStartAutoSync) return;
@@ -966,17 +981,8 @@ const App: React.FC = () => {
 
     const unsub = api.onLiveSyncFileUpdated((data: any) => {
       if (!vaultPath) return;
-      if (data.relativePath === AI_LIVE_SESSION_RELATIVE_PATH) {
-        const sessionFile = resolveVaultRelativeFile(vaultPath, AI_LIVE_SESSION_RELATIVE_PATH);
-        api.readFile(sessionFile).then((content: string) => {
-          let payload: AILiveSessionPayload | null = null;
-          try { payload = JSON.parse(content); } catch { payload = null; }
-          applyAiLiveSessionPayload(payload);
-        }).catch(() => {});
-        return;
-      }
       /* Refresh file tree */
-      refreshTree();
+      refreshTree(true);
       if (typeof data.relativePath !== 'string' || !data.relativePath.startsWith('.')) {
         scheduleIndexRefreshRef.current();
       }
@@ -1017,9 +1023,17 @@ const App: React.FC = () => {
     });
 
     return () => { if (unsub) unsub(); };
-  }, [vaultPath, currentFile, aiChatMessages.length, applyAiLiveSessionPayload]);
+  }, [vaultPath, currentFile, aiChatMessages.length]);
 
-  /* Live Sync — auto-connect on startup if config saved (v1.0.0) */
+  /* A process has one file watcher. Always release the previous Vault before switching projects. */
+  useEffect(() => {
+    if (!vaultPath || !api.liveSyncStop) return;
+    return () => {
+      api.liveSyncStop?.().catch(() => {});
+    };
+  }, [vaultPath]);
+
+  /* Live Sync — auto-connect on startup if this Vault has a saved config (v1.0.0) */
   useEffect(() => {
     if (!vaultPath) return;
     const api = (window as any).arsnote;
@@ -1048,12 +1062,23 @@ const App: React.FC = () => {
         const persistedCfg = await api.liveSyncLoadConfig?.(vaultPath);
         const saved = localStorage.getItem('ars-note.live-sync');
         const savedCfg = saved ? JSON.parse(saved) : null;
-        const legacyRendererApiKey = typeof savedCfg?.apiKey === 'string' ? savedCfg.apiKey : '';
+        const expectedVaultId = String(
+          persistedCfg?.vaultId || syncConfig?.remoteVaultId || vault?.vaultId || '',
+        ).trim();
+        const scopedRendererCfg = isLiveSyncRendererHintForVault(savedCfg, vaultPath, expectedVaultId)
+          ? savedCfg
+          : null;
+        const legacyRendererApiKey = typeof scopedRendererCfg?.apiKey === 'string' ? scopedRendererCfg.apiKey : '';
+        const hasVaultLiveConfig = !!(
+          (persistedCfg?.enabled && persistedCfg?.serverUrl)
+          || (syncConfig?.enabled && syncConfig.provider === 'self-hosted' && syncConfig.endpoint)
+        );
+        if (!hasVaultLiveConfig) return;
         let cfg: any = {
           enabled: true,
-          serverUrl: persistedCfg?.serverUrl || savedCfg?.serverUrl || syncConfig?.endpoint || '',
+          serverUrl: persistedCfg?.serverUrl || syncConfig?.endpoint || scopedRendererCfg?.serverUrl || '',
           apiKey: persistedCfg?.apiKey || legacyRendererApiKey || undefined,
-          vaultId: persistedCfg?.vaultId || savedCfg?.vaultId || syncConfig?.remoteVaultId || undefined,
+          vaultId: persistedCfg?.vaultId || syncConfig?.remoteVaultId || vault?.vaultId || scopedRendererCfg?.vaultId || undefined,
           connectionMode: 'join',
         };
 
@@ -1065,7 +1090,7 @@ const App: React.FC = () => {
 
         const status = await api.liveSyncStatus?.().catch(() => null);
         if (cancelled) return;
-        if (status?.connected && status.serverUrl === cfg.serverUrl) return;
+        if (isSameLiveSyncTarget(status, cfg)) return;
 
         if (false && api.liveSyncPreflightStart) {
           const preflight = await api.liveSyncPreflightStart(vaultPath, cfg);
@@ -1105,11 +1130,11 @@ const App: React.FC = () => {
         const savedConfig = result.config || cfg;
         try {
           localStorage.removeItem(autoConnectProtectionKey);
-          localStorage.setItem('ars-note.live-sync', JSON.stringify({
+          localStorage.setItem('ars-note.live-sync', JSON.stringify(createLiveSyncRendererHint(vaultPath, {
             serverUrl: savedConfig.serverUrl || cfg.serverUrl,
             vaultId: savedConfig.vaultId || cfg.vaultId || '',
             connectionMode: 'join',
-          }));
+          })));
         } catch {
           // Persisting the convenience config is optional.
         }
@@ -1117,9 +1142,12 @@ const App: React.FC = () => {
         // Auto-connect should never block opening the vault.
       }
     };
-    autoConnect();
-    return () => { cancelled = true; };
-  }, [vaultPath, syncConfig]);
+    const startupTimer = window.setTimeout(() => { void autoConnect(); }, 1_500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(startupTimer);
+    };
+  }, [vault?.vaultId, vaultPath, syncConfig]);
 
   /* ── Global Ctrl+P quick file switcher ── */
   useEffect(() => {
@@ -1245,9 +1273,13 @@ const App: React.FC = () => {
     const scheduleCurrentIndex = () => runner.schedule();
     indexRefreshRunnerRef.current = runner;
     scheduleIndexRefreshRef.current = scheduleCurrentIndex;
-    void runner.runNow().catch((error) => console.error('Failed to scan vault index:', error));
+    setVaultIndex(EMPTY_INDEX);
+    const initialScanTimer = window.setTimeout(() => {
+      void runner.runNow().catch((error) => console.error('Failed to scan vault index:', error));
+    }, 700);
 
     return () => {
+      window.clearTimeout(initialScanTimer);
       runner.cancel();
       if (indexRefreshRunnerRef.current === runner) indexRefreshRunnerRef.current = null;
       if (scheduleIndexRefreshRef.current === scheduleCurrentIndex) scheduleIndexRefreshRef.current = () => {};
@@ -1278,14 +1310,27 @@ const App: React.FC = () => {
   }, []);
 
   const handleEditorChange = useCallback((value: string) => {
+    currentContentStateRef.current = value;
     setCurrentContent(value);
     if (currentFile) scheduleLivePush(currentFile, value);
   }, [currentFile, scheduleLivePush]);
 
+  const flushExcalidrawContent = useCallback(async (value: string) => {
+    const filePath = currentFile;
+    if (!filePath) return;
+    try {
+      await api.writeFile(filePath, value);
+      scheduleLivePush(filePath, value);
+      scheduleIndexRefresh();
+    } catch (error) {
+      console.error('Failed to flush Excalidraw scene:', error);
+    }
+  }, [currentFile, scheduleIndexRefresh, scheduleLivePush]);
+
   const doSave = useCallback(async () => {
     if (!currentFile || currentContent === savedContent) return;
     setSaveStatus('saving');
-    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
+    try { await api.writeFile(currentFile, currentContent); savedContentStateRef.current = currentContent; setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
     catch (err) { console.error('Save failed:', err); setSaveStatus('error'); }
   }, [currentFile, currentContent, savedContent, scheduleIndexRefresh]);
 
@@ -1293,7 +1338,7 @@ const App: React.FC = () => {
     if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
     if (!currentFile || currentContent === savedContent) return;
     setSaveStatus('saving');
-    try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
+    try { await api.writeFile(currentFile, currentContent); savedContentStateRef.current = currentContent; setSavedContent(currentContent); setSaveStatus('saved'); scheduleIndexRefresh(); }
     catch (err) { console.error('Save failed:', err); setSaveStatus('error'); }
   }, [currentFile, currentContent, savedContent, scheduleIndexRefresh]);
 
@@ -1304,9 +1349,9 @@ const App: React.FC = () => {
   }, [currentContent, currentFile, savedContent, doSave]);
 
   /* ── Load file tree ── */
-  const refreshTree = useCallback(async () => {
+  const refreshTree = useCallback(async (force = false) => {
     if (!vaultPath) return;
-    try { const tree = await api.readFileTree(vaultPath); setFileTree(tree); }
+    try { const tree = await api.readFileTree(vaultPath, force); setFileTree(tree); }
     catch (err) { console.error('Failed to read file tree:', err); }
   }, [vaultPath]);
 
@@ -1457,7 +1502,34 @@ const App: React.FC = () => {
   }, [buildCurrentWorkspaceSession, workspaceSessionKey]);
 
   const loadFileIntoEditor = useCallback(async (filePath: string, baseTabs?: string[], options?: { recordHistory?: boolean }) => {
-    const content = await api.readFile(filePath);
+    const requestId = ++documentOpenRequestRef.current;
+    const label = filePath.split(/[\\/]/).pop() || filePath;
+    const hasMountedEditor = Boolean(editorRef.current?.getView());
+    startDocumentOpening({ path: filePath, label, requestId, immediate: !hasMountedEditor });
+    if (!hasMountedEditor) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (requestId !== documentOpenRequestRef.current) return;
+    }
+
+    let content: string;
+    let readTimeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      content = await Promise.race([
+        api.readFile(filePath),
+        new Promise<string>((_resolve, reject) => {
+          readTimeout = setTimeout(() => reject(new Error(`Timed out opening ${label}`)), 20_000);
+        }),
+      ]);
+    } catch (error) {
+      if (requestId === documentOpenRequestRef.current) finishDocumentOpeningEvent(filePath);
+      throw error;
+    } finally {
+      if (readTimeout) clearTimeout(readTimeout);
+    }
+    if (requestId !== documentOpenRequestRef.current) return;
+    currentFileStateRef.current = filePath;
+    currentContentStateRef.current = content;
+    savedContentStateRef.current = content;
     setCurrentFile(filePath);
     setCurrentContent(content);
     setSavedContent(content);
@@ -1475,16 +1547,34 @@ const App: React.FC = () => {
       return next.slice(-16);
     });
     if (options?.recordHistory !== false) recordNavigation(filePath);
-  }, [pinnedTabs, recordNavigation]);
+    if (!/\.md$/i.test(filePath) || viewMode === 'preview') {
+      requestAnimationFrame(() => requestAnimationFrame(() => finishDocumentOpeningEvent(filePath)));
+    }
+  }, [pinnedTabs, recordNavigation, viewMode]);
 
   const openFile = useCallback(async (filePath: string) => {
-    if (currentFile && currentContent !== savedContent) {
-      try { await api.writeFile(currentFile, currentContent); setSavedContent(currentContent); }
+    setShowCenterGraph(false);
+    setShowCenterAI(false);
+    setShowCenterSchedule(false);
+    setShowBalanceLab(false);
+    const activeFile = currentFileStateRef.current;
+    const activeContent = currentContentStateRef.current;
+    if (activeFile && activeContent !== savedContentStateRef.current) {
+      try {
+        await api.writeFile(activeFile, activeContent);
+        savedContentStateRef.current = activeContent;
+        setSavedContent(activeContent);
+      }
       catch (err) { console.error('Failed to save before switching:', err); }
     }
     try { await loadFileIntoEditor(filePath); }
-    catch (err) { console.error('Failed to open file:', err); }
-  }, [currentFile, currentContent, savedContent, loadFileIntoEditor]);
+    catch (err) {
+      console.error('Failed to open file:', err);
+      const label = filePath.split(/[\\/]/).pop() || filePath;
+      setCreationMsg(`打开失败：${label}`);
+      setTimeout(() => setCreationMsg(''), 3_500);
+    }
+  }, [loadFileIntoEditor]);
 
   const navigateFileHistory = useCallback(async (delta: -1 | 1) => {
     const history = navigationHistoryRef.current;
@@ -1543,6 +1633,7 @@ const App: React.FC = () => {
     setShowCenterSchedule(Boolean(session?.showCenterSchedule));
     setShowCenterAI(Boolean(session?.showCenterAI && !session?.showCenterSchedule));
     setShowCenterGraph(Boolean(session?.showCenterGraph && !session?.showCenterAI && !session?.showCenterSchedule));
+    setShowBalanceLab(false);
     setFocusMode(Boolean(session?.focusMode));
     autoLeftCollapsedRef.current = false;
     leftCollapsedRef.current = Boolean(session?.leftCollapsed);
@@ -1662,6 +1753,7 @@ const App: React.FC = () => {
       setShowCenterSchedule(snapshot.showCenterSchedule);
       setShowCenterAI(snapshot.showCenterAI && !snapshot.showCenterSchedule);
       setShowCenterGraph(snapshot.showCenterGraph && !snapshot.showCenterAI && !snapshot.showCenterSchedule);
+      setShowBalanceLab(false);
       setFocusMode(snapshot.focusMode);
       autoLeftCollapsedRef.current = false;
       leftCollapsedRef.current = snapshot.leftCollapsed;
@@ -1708,6 +1800,7 @@ const App: React.FC = () => {
 
   const applyVaultResult = useCallback((result: VaultOpenResult) => {
     setVault(result.config); setVaultPath(result.path);
+    setSyncConfig(null);
     setCurrentFile(''); setCurrentContent(''); setSavedContent(''); setSaveStatus('saved');
     void restoreWorkspaceSession(result);
     // Auto-load saved AI config for this vault
@@ -1723,7 +1816,9 @@ const App: React.FC = () => {
     // Auto-load last AI conversation
     setAiChatMessages([]);
     if (api.aiLoadLatestConversation) {
-      api.aiLoadLatestConversation(result.path).then((msgs: any[]) => {
+      const openedVaultPath = result.path;
+      window.setTimeout(() => api.aiLoadLatestConversation(openedVaultPath).then((msgs: any[]) => {
+        if (activeVaultPathRef.current !== openedVaultPath) return;
         if (msgs && msgs.length > 0) {
           const chatMsgs = normalizeDisplayAIChatMessages(msgs).filter((message) => message.role !== 'system');
           if (chatMsgs.length > 0) {
@@ -1731,7 +1826,7 @@ const App: React.FC = () => {
             setAiChatMessages(chatMsgs);
           }
         }
-      }).catch(() => {});
+      }).catch(() => {}), 900);
     }
   }, [restoreWorkspaceSession]);
 
@@ -2315,10 +2410,13 @@ const App: React.FC = () => {
 
   const handleLoadSyncConfig = useCallback(async () => {
     if (!vaultPath) return;
+    const requestedVaultPath = vaultPath;
     try {
-      const config = await api.loadSyncConfig(vaultPath);
+      const config = await api.loadSyncConfig(requestedVaultPath);
+      if (activeVaultPathRef.current !== requestedVaultPath) return;
       setSyncConfig(config);
     } catch (err) {
+      if (activeVaultPathRef.current !== requestedVaultPath) return;
       console.error('Failed to load sync config:', err);
     }
   }, [vaultPath]);
@@ -2336,9 +2434,11 @@ const App: React.FC = () => {
           apiKey: storedLiveConfig.apiKey || undefined,
           vaultId: saved.remoteVaultId,
         };
-        localStorage.setItem('ars-note.live-sync', JSON.stringify({
+        localStorage.setItem('ars-note.live-sync', JSON.stringify(createLiveSyncRendererHint(vaultPath, {
           serverUrl: liveConfig.serverUrl,
-        }));
+          vaultId: liveConfig.vaultId || vault?.vaultId || '',
+          connectionMode: 'join',
+        })));
         api.liveSyncSaveConfig?.(vaultPath, liveConfig).catch(() => {});
         api.liveSyncStart(vaultPath, liveConfig).catch(() => {});
       }
@@ -2353,7 +2453,7 @@ const App: React.FC = () => {
       console.error('Failed to save sync config:', err);
       showNotice((err as any)?.message || t.operationFailed, 'error', 6200);
     }
-  }, [showNotice, t.operationFailed, vaultPath]);
+  }, [showNotice, t.operationFailed, vault?.vaultId, vaultPath]);
 
   /* ── Auto-load sync config when vault opens ── */
   useEffect(() => { if (vaultPath) handleLoadSyncConfig(); }, [vaultPath, handleLoadSyncConfig]);
@@ -2501,9 +2601,11 @@ const App: React.FC = () => {
           apiKey: credentials.apiKey || undefined,
           vaultId: syncConfig?.remoteVaultId,
         };
-        localStorage.setItem('ars-note.live-sync', JSON.stringify({
+        localStorage.setItem('ars-note.live-sync', JSON.stringify(createLiveSyncRendererHint(vaultPath, {
           serverUrl: liveConfig.serverUrl,
-        }));
+          vaultId: liveConfig.vaultId || vault?.vaultId || '',
+          connectionMode: 'join',
+        })));
         api.liveSyncSaveConfig?.(vaultPath, liveConfig).catch(() => {});
         api.liveSyncStart(vaultPath, liveConfig).catch(() => {});
       }
@@ -2512,7 +2614,7 @@ const App: React.FC = () => {
     } catch (err) {
       console.error('Failed to set self-hosted credentials:', err);
     }
-  }, [vaultPath, syncConfig?.remoteVaultId]);
+  }, [vault?.vaultId, vaultPath, syncConfig?.remoteVaultId]);
 
   const handleClearSelfHostedCredentials = useCallback(async () => {
     if (!vaultPath) return;
@@ -2735,7 +2837,7 @@ const App: React.FC = () => {
   }, [vaultIndex, vaultPath, fileTree]);
 
   const handleAISendChat = useCallback(async (userPrompt: string) => {
-    if (!vaultPath || aiSending || aiRemoteSending || !userPrompt.trim()) return;
+    if (!vaultPath || aiSending || !userPrompt.trim()) return;
     if (!aiConfig.hasApiKey && !aiConfig.baseUrl) {
       setAiChatMessages((prev) => [...prev, { role: 'assistant' as const, content: t.aiNotConfigured, createdAt: new Date().toISOString() }]);
       return;
@@ -2746,7 +2848,6 @@ const App: React.FC = () => {
     activeAIRequestIdRef.current = requestId;
     setAiChatMessages((prev) => [...prev, userMsg]);
     setAiSending(true);
-    setAiRemoteSending(false);
     setAiRetryPrompt('');
     setAiInput('');
     setAiLiveToolCalls([]); // clear live progress
@@ -2770,7 +2871,7 @@ const App: React.FC = () => {
         prompt: userPrompt,
         contextMode: aiContextMode,
         currentFilePath: currentFile,
-        currentFileContent: currentContent,
+        currentFileContent: deferredCurrentContent,
         selectedText,
         gameWorkspaceSummary: gameWorkspace.summary ?? undefined,
         gameWorkspaceEntries: gameWorkspace.entries,
@@ -2779,7 +2880,14 @@ const App: React.FC = () => {
       }, aiChatMessages);
       setAiContextUsage(builtRequest.usage);
       const contextMessages = builtRequest.messages;
-      const response: AIResponse = await api.sendAIChat(vaultPath, contextMessages, { controlMode: aiControlMode, requestId });
+      const currentFilePath = currentFile
+        ? normalizePath(currentFile.replace(vaultPath, '').replace(/^[\\/]/, ''))
+        : undefined;
+      const response: AIResponse = await api.sendAIChat(vaultPath, contextMessages, {
+        controlMode: aiControlMode,
+        requestId,
+        currentFilePath,
+      });
       if (response.contextUsage) setAiContextUsage(response.contextUsage);
       if (response.ok) {
         const toolCalls = (response as any).toolCalls as import('./types').AIToolCallRecord[] | undefined;
@@ -2816,7 +2924,7 @@ const App: React.FC = () => {
       setAiSending(false);
       setAiLiveToolCalls([]);
     }
-  }, [vaultPath, aiSending, aiRemoteSending, aiConfig, aiContextMode, aiControlMode, currentFile, currentContent, fileTree, gameWorkspace, vault, t, refreshTree, refreshIndex]);
+  }, [vaultPath, aiSending, aiConfig, aiContextMode, aiControlMode, currentFile, currentContent, fileTree, gameWorkspace, vault, t, refreshTree, refreshIndex]);
 
   const handleAICancelChat = useCallback(async () => {
     const requestId = activeAIRequestIdRef.current;
@@ -2870,7 +2978,7 @@ const App: React.FC = () => {
         includeSprintPlan: true,
         includeMemberPages: true,
         includeTaskDocs: true,
-        includeObsidianCommandCenter: true,
+        includeTeamCommandCenter: true,
         includeDashboard: true,
       });
       productionDocPaths = Array.isArray(generated?.paths) ? generated.paths : [];
@@ -2886,12 +2994,13 @@ const App: React.FC = () => {
     return { ...imported, productionDocPaths, taskDocCreatedCount, taskDocLinkedCount, taskDocUpgradedCount, taskDocSkippedCount, taskDocPaths };
   }, [refreshIndex, refreshTree, scheduleLivePush, vaultPath]);
 
-  const handleOpenObsidianTeamWorkspace = useCallback(async () => {
+  const handleOpenTeamWorkspace = useCallback(async () => {
     if (!vaultPath || teamWorkspaceOpening) return;
 
     setShowCenterSchedule(true);
     setShowCenterAI(false);
     setShowCenterGraph(false);
+    setShowBalanceLab(false);
     revealRightPanel();
     setRightTab('game');
 
@@ -3000,8 +3109,10 @@ const App: React.FC = () => {
   const isMarkdownFile = currentFile ? currentFile.toLowerCase().endsWith('.md') : false;
   const isExcalidrawFile = currentFile ? currentFile.toLowerCase().endsWith('.excalidraw') : false;
   const isCanvasFile = currentFile ? currentFile.toLowerCase().endsWith('.canvas') : false;
-  const aiBusy = aiSending || aiRemoteSending;
+  const aiBusy = aiSending;
+  const aiContextMeterVisible = showCenterAI || (!rightCollapsed && rightTab === 'ai');
   const aiContextUsagePreview = useMemo(() => {
+    if (!aiContextMeterVisible) return aiContextUsage;
     const prompt = debouncedAIInput.trim() || ' ';
     try {
       const arshisContext = gameWorkspace.summary
@@ -3021,11 +3132,123 @@ const App: React.FC = () => {
     } catch {
       return estimateAIContextUsageFromMessages(aiChatMessages, debouncedAIInput, AI_CONTEXT_TOKEN_LIMIT);
     }
-  }, [aiChatMessages, aiContextMode, aiTeamScheduleContextPreview, currentContent, currentFile, debouncedAIInput, gameWorkspace.entries, gameWorkspace.summary, vault?.name]);
+  }, [aiChatMessages, aiContextMode, aiContextMeterVisible, aiContextUsage, aiTeamScheduleContextPreview, deferredCurrentContent, currentFile, debouncedAIInput, gameWorkspace.entries, gameWorkspace.summary, vault?.name]);
   const visibleAIContextUsage = useMemo(() => {
-    if (aiSending || aiRemoteSending) return aiContextUsage;
+    if (aiSending) return aiContextUsage;
     return aiContextUsagePreview;
-  }, [aiContextUsage, aiContextUsagePreview, aiRemoteSending, aiSending]);
+  }, [aiContextUsage, aiContextUsagePreview, aiSending]);
+  const rightPanelDocumentContent = rightTab === 'preview' || rightTab === 'outline'
+    ? deferredCurrentContent
+    : '';
+  const editorPreviewContent = viewMode === 'split' ? deferredCurrentContent : currentContent;
+  const editorPreviewHtml = useMemo(() => (
+    viewMode === 'preview' || viewMode === 'split'
+      ? renderMarkdownHtml(editorPreviewContent)
+      : ''
+  ), [editorPreviewContent, viewMode]);
+  const handleRightPanelJumpToLine = useCallback((line: number) => {
+    const view = editorRef.current?.getView();
+    if (!view) return;
+    const pos = view.state.doc.line(Math.min(line, view.state.doc.lines)).from;
+    view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    view.focus();
+  }, []);
+  const handleRightPanelAISaveConfig = useCallback(async () => {
+    await handleAISaveConfig({
+      provider: aiFormProvider as any,
+      baseUrl: aiFormBaseUrl,
+      model: aiFormModel,
+      hasApiKey: !!aiFormApiKey,
+      enabled: true,
+    });
+  }, [aiFormApiKey, aiFormBaseUrl, aiFormModel, aiFormProvider, handleAISaveConfig]);
+  const handleRightPanelAIFormChange = useCallback((field: string, value: string) => {
+    if (field === 'provider') setAiFormProvider(value);
+    else if (field === 'baseUrl') setAiFormBaseUrl(value);
+    else if (field === 'model') setAiFormModel(value);
+    else if (field === 'apiKey') setAiFormApiKey(value);
+  }, []);
+  const handleRightPanelAIRetry = useCallback(async () => {
+    await handleAISendChat(aiRetryPrompt);
+  }, [aiRetryPrompt, handleAISendChat]);
+  const handleRightPanelRefreshVault = useCallback(async () => {
+    await refreshTree();
+    await refreshIndex();
+  }, [refreshIndex, refreshTree]);
+  const handleRightPanelCopyResponse = useCallback(() => {
+    const lastAssistant = [...aiChatMessages].reverse().find(message => message.role === 'assistant');
+    if (!lastAssistant) return;
+    navigator.clipboard.writeText(lastAssistant.content)
+      .then(() => {
+        setAiCopiedResponse(true);
+        setTimeout(() => setAiCopiedResponse(false), 2000);
+      })
+      .catch(() => {});
+  }, [aiChatMessages]);
+  const handleToggleFocusMode = useCallback(() => setFocusMode(current => !current), []);
+  const handleOpenShortcutGuide = useCallback(() => setShowShortcutGuide(true), []);
+  const handleSidebarNewFile = useCallback(() => {
+    setContextTarget(vaultPath);
+    setShowNewFile(true);
+  }, [vaultPath]);
+  const handleSidebarNewFolder = useCallback(() => {
+    setContextTarget(vaultPath);
+    setShowNewFolder(true);
+  }, [vaultPath]);
+  const handleSidebarNewFromTemplate = useCallback(() => setShowNewFromTemplate(true), []);
+  const handleSidebarDelete = useCallback((path: string) => setDeleteTarget(path), []);
+  const handleSidebarRefresh = useCallback(() => {
+    void refreshTree(true);
+  }, [refreshTree]);
+  const handleSidebarToggleTheme = useCallback(() => {
+    setTheme(current => current === 'dark' ? 'light' : 'dark');
+  }, []);
+  const handleSidebarSearch = useCallback((query: string) => {
+    revealLeftPanel();
+    revealRightPanel();
+    setRightTab('search');
+    void handleSearch(query);
+  }, [handleSearch, revealLeftPanel, revealRightPanel]);
+  const handleSidebarNavigate = useCallback((tab: string) => {
+    if (tab === 'graph') {
+      setShowCenterGraph(true);
+      setShowCenterAI(false);
+      setShowCenterSchedule(false);
+      setShowBalanceLab(false);
+    } else if (tab === 'ai') {
+      rightCollapsedBeforeCenterAIRef.current = rightCollapsedRef.current;
+      autoRightCollapsedRef.current = false;
+      rightCollapsedRef.current = true;
+      setRightCollapsed(true);
+      setShowCenterAI(true);
+      setShowCenterGraph(false);
+      setShowCenterSchedule(false);
+      setShowBalanceLab(false);
+    } else if (tab === 'schedule') {
+      revealLeftPanel();
+      setShowCenterSchedule(true);
+      setShowCenterAI(false);
+      setShowCenterGraph(false);
+      setShowBalanceLab(false);
+    } else if (tab === 'balance') {
+      revealLeftPanel();
+      setShowBalanceLab(true);
+      setShowCenterSchedule(false);
+      setShowCenterAI(false);
+      setShowCenterGraph(false);
+    } else if (tab === 'settings') {
+      openSettingsModal();
+    } else {
+      revealLeftPanel();
+      revealRightPanel();
+      setSettingsModalOpen(false);
+      setShowCenterGraph(false);
+      setShowCenterAI(false);
+      setShowCenterSchedule(false);
+      setShowBalanceLab(false);
+      setRightTab(tab as RightTab);
+    }
+  }, [openSettingsModal, revealLeftPanel, revealRightPanel]);
   const canNavigateBack = navigationIndex > 0;
   const canNavigateForward = navigationIndex >= 0 && navigationIndex < navigationHistory.length - 1;
   const recentFilePaths = useMemo(() => {
@@ -3183,6 +3406,7 @@ const App: React.FC = () => {
       setShowCenterGraph(false);
       setShowCenterAI(false);
       setShowCenterSchedule(false);
+      setShowBalanceLab(false);
       setRightTab(tab);
     };
     const currentFileBookmarked = currentFile
@@ -3362,8 +3586,8 @@ const App: React.FC = () => {
         id: 'open-workspace',
         title: '打开 Ars-note 团队工作台',
         subtitle: '团队时间表、制作指挥中心和生产文档刷新',
-        keywords: ['workspace', 'game', 'team', 'obsidian', 'production', 'schedule', '工作台', '团队', '时间表', '制作指挥中心'],
-        run: () => { void handleOpenObsidianTeamWorkspace(); },
+        keywords: ['workspace', 'game', 'team', 'ars-note', 'production', 'schedule', '工作台', '团队', '时间表', '制作指挥中心'],
+        run: () => { void handleOpenTeamWorkspace(); },
       },
       {
         id: 'open-preview-panel',
@@ -3419,7 +3643,20 @@ const App: React.FC = () => {
         title: '打开知识图谱',
         subtitle: '中间主视图',
         keywords: ['graph', 'knowledge', '图谱', '知识'],
-        run: () => { setShowCenterAI(false); setShowCenterSchedule(false); setShowCenterGraph(true); setRightTab('graph'); },
+        run: () => { setShowCenterAI(false); setShowCenterSchedule(false); setShowBalanceLab(false); setShowCenterGraph(true); setRightTab('graph'); },
+      },
+      {
+        id: 'open-balance-lab',
+        title: '打开数值实验室',
+        subtitle: '成长、战斗、经济与掉落模拟',
+        keywords: ['balance', 'simulator', '数值', '模拟器', '策划'],
+        run: () => {
+          revealLeftPanel();
+          setShowCenterAI(false);
+          setShowCenterSchedule(false);
+          setShowCenterGraph(false);
+          setShowBalanceLab(true);
+        },
       },
       {
         id: 'export-backup',
@@ -3490,7 +3727,7 @@ const App: React.FC = () => {
     handleCompareLocalRemote,
     handleExportBackup,
     handleGenerateManifest,
-    handleOpenObsidianTeamWorkspace,
+    handleOpenTeamWorkspace,
     handleManualPush,
     handleNewCanvas,
     handleNewWireframe,
@@ -3726,6 +3963,7 @@ const App: React.FC = () => {
         onSave={saveNow}
         welcome={!vault}
       />
+      <DocumentOpeningOverlay />
       {!vault ? (
         <WelcomeScreen onCreateVault={handleCreateVault} onOpenVault={handleOpenVault} onOpenRecent={handleOpenRecent} />
       ) : (
@@ -3738,11 +3976,11 @@ const App: React.FC = () => {
               '--right-panel-width': `${rightPanelWidth}px`,
             } as React.CSSProperties}
           >
-            <Sidebar onNewFile={() => { setContextTarget(vaultPath); setShowNewFile(true); }} onNewFolder={() => { setContextTarget(vaultPath); setShowNewFolder(true); }}
-              onNewFromTemplate={() => setShowNewFromTemplate(true)}
+            <Sidebar onNewFile={handleSidebarNewFile} onNewFolder={handleSidebarNewFolder}
+              onNewFromTemplate={handleSidebarNewFromTemplate}
               onNewWireframe={handleNewWireframe}
               onNewCanvas={handleNewCanvas}
-              onDelete={(p) => setDeleteTarget(p)} onSetContextTarget={setContextTarget} onRefresh={refreshTree} fileTree={fileTree} vaultPath={vaultPath} currentFile={currentFile} onOpenFile={openFile}
+              onDelete={handleSidebarDelete} onSetContextTarget={setContextTarget} onRefresh={handleSidebarRefresh} fileTree={fileTree} vaultPath={vaultPath} currentFile={currentFile} onOpenFile={openFile}
               onMoveItem={handleMoveItem}
               bookmarkedFiles={bookmarkedFiles}
               recentFiles={recentFilePaths}
@@ -3750,48 +3988,14 @@ const App: React.FC = () => {
               isConnected={!!vault}
               appVersion={APP_VERSION_LABEL}
               theme={theme}
-              activePanelTab={showCenterSchedule ? 'schedule' : showCenterAI ? 'ai' : showCenterGraph ? 'graph' : rightTab}
+              activePanelTab={showBalanceLab ? 'balance' : showCenterSchedule ? 'schedule' : showCenterAI ? 'ai' : showCenterGraph ? 'graph' : rightTab}
               revealCurrentFileRequest={sidebarRevealRequest}
               collapsed={leftCollapsed}
               onToggleCollapse={toggleLeftPanel}
               onOpenSettings={openSettingsModal}
-              onToggleTheme={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
-              onSearchInVault={(query) => {
-                revealLeftPanel();
-                revealRightPanel();
-                setRightTab('search');
-                void handleSearch(query);
-              }}
-              onNavigateToTab={(tab) => {
-                if (tab === 'graph') {
-                  setShowCenterGraph(true);
-                  setShowCenterAI(false);
-                  setShowCenterSchedule(false);
-                } else if (tab === 'ai') {
-                  rightCollapsedBeforeCenterAIRef.current = rightCollapsedRef.current;
-                  autoRightCollapsedRef.current = false;
-                  rightCollapsedRef.current = true;
-                  setRightCollapsed(true);
-                  setShowCenterAI(true);
-                  setShowCenterGraph(false);
-                  setShowCenterSchedule(false);
-                } else if (tab === 'schedule') {
-                  revealLeftPanel();
-                  setShowCenterSchedule(true);
-                  setShowCenterAI(false);
-                  setShowCenterGraph(false);
-                } else if (tab === 'settings') {
-                  openSettingsModal();
-                } else {
-                  revealLeftPanel();
-                  revealRightPanel();
-                  setSettingsModalOpen(false);
-                  setShowCenterGraph(false);
-                  setShowCenterAI(false);
-                  setShowCenterSchedule(false);
-                  setRightTab(tab as RightTab);
-                }
-              }} />
+              onToggleTheme={handleSidebarToggleTheme}
+              onSearchInVault={handleSidebarSearch}
+              onNavigateToTab={handleSidebarNavigate} />
             {!leftCollapsed && (
               <div
                 className="workspace-resizer workspace-resizer-left"
@@ -3801,8 +4005,8 @@ const App: React.FC = () => {
                 onMouseDown={beginSidebarResize}
               />
             )}
-            <div className={'editor-area' + ((showCenterGraph || showCenterAI || showCenterSchedule) ? ' editor-area-graph' : '')}>
-              {currentFile && (openTabs.length > 1 || navigationHistory.length > 1) && !showCenterGraph && !showCenterAI && !showCenterSchedule && (
+            <div className={'editor-area' + ((showCenterGraph || showCenterAI || showCenterSchedule || showBalanceLab) ? ' editor-area-graph' : '')}>
+              {currentFile && (openTabs.length > 1 || navigationHistory.length > 1) && !showCenterGraph && !showCenterAI && !showCenterSchedule && !showBalanceLab && (
                 <div className="document-tab-bar" role="tablist" aria-label="Open files">
                   <div className="document-tab-nav" aria-label="File navigation history">
                     <button
@@ -3949,7 +4153,17 @@ const App: React.FC = () => {
                   })}
                 </div>
               )}
-              {showCenterSchedule ? (
+              {showBalanceLab ? (
+                <ErrorBoundary>
+                  <React.Suspense fallback={<LazyPanelFallback label="正在加载数值实验室..." />}>
+                    <BalanceLab
+                      vaultPath={vaultPath}
+                      vaultName={vault?.name || ''}
+                      onClose={() => setShowBalanceLab(false)}
+                    />
+                  </React.Suspense>
+                </ErrorBoundary>
+              ) : showCenterSchedule ? (
                 <ErrorBoundary>
                   <React.Suspense fallback={<LazyPanelFallback label="正在加载团队时间表..." />}>
                     <TeamSchedulePanel
@@ -4060,6 +4274,16 @@ const App: React.FC = () => {
                               </React.Fragment>
                             )}
                           </div>
+                          <AIWritingQualityCard
+                            active={showCenterAI && aiPanelTab === 'chat'}
+                            currentFilePath={currentFile || ''}
+                            content={deferredCurrentContent}
+                            configured={aiConfig.hasApiKey}
+                            sending={aiBusy}
+                            controlMode={aiControlMode}
+                            onSendPrompt={handleAISendChat}
+                            variant="center"
+                          />
                           <div className={'center-ai-input-area' + (centerAIToolsOpen ? ' tools-open' : '')}>
                             {centerAIToolsOpen && (
                               <div className="center-ai-tools-drawer">
@@ -4075,7 +4299,7 @@ const App: React.FC = () => {
                                       ['member', '成员执行'],
                                       ['producer', '制作人接管'],
                                     ] as [AIControlMode, string][]).map(([mode, label]) => (
-                                      <button key={mode} className={"ai-context-btn ai-control-btn ai-control-" + mode + (aiControlMode === mode ? " active" : "")} onClick={() => setAiControlMode(mode)} title={mode === 'readonly' ? '只读分析，不允许写入或确认执行' : mode === 'member' ? '普通文件操作需确认，不允许团队级接管工具' : '团队级生产工具可用，但仍需确认码'}>
+                                      <button key={mode} className={"ai-context-btn ai-control-btn ai-control-" + mode + (aiControlMode === mode ? " active" : "")} onClick={() => setAiControlMode(mode)} title={mode === 'readonly' ? '只读分析，不允许写入或删除' : mode === 'member' ? '按明确要求直接修改普通文件，并自动保存回滚记录' : '可直接维护团队排期与生产文档，并自动保存审计和回滚记录'}>
                                         {label}
                                       </button>
                                     ))}
@@ -4291,18 +4515,18 @@ const App: React.FC = () => {
                     <div className={'editor-body-area' + (viewMode === 'split' ? ' split-mode' : '')}>
                       {viewMode === 'preview' ? (
                         <div className="markdown-preview preview-full">
-                          <div className="markdown-preview-body" onClick={handleMarkdownPreviewClick} dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(currentContent) }} />
+                          <div className="markdown-preview-body" onClick={handleMarkdownPreviewClick} dangerouslySetInnerHTML={{ __html: editorPreviewHtml }} />
                         </div>
                       ) : (
                         (viewMode === 'live' || viewMode === 'source' || viewMode === 'split') && (
                           <div className={viewMode === 'split' ? 'editor-split-pane' : viewMode === 'live' ? 'cm-live-editor-shell' : 'cm-editor-shell'}>
-                            <Editor key={viewMode === 'live' ? 'lp' : 'src'} ref={editorRef} content={currentContent} onChange={handleEditorChange} onSave={saveNow} vaultPath={vaultPath} vaultFiles={allMdFiles} vaultTags={allVaultTags.map(t => t[0])} livePreview={viewMode === 'live'} readOnly={false} />
+                            <Editor key={viewMode === 'live' ? 'lp' : 'src'} ref={editorRef} documentKey={currentFile} content={currentContent} onChange={handleEditorChange} onSave={saveNow} vaultPath={vaultPath} vaultFiles={allMdFiles} vaultTags={allVaultTags.map(t => t[0])} livePreview={viewMode === 'live'} readOnly={false} onReady={finishDocumentOpeningEvent} />
                           </div>
                         )
                       )}
                       {viewMode === 'split' && (
                         <div className={'markdown-preview' + (viewMode === 'split' ? ' preview-split-pane' : ' preview-full')}>
-                          <div className="markdown-preview-body" onClick={handleMarkdownPreviewClick} dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(currentContent) }} />
+                          <div className="markdown-preview-body" onClick={handleMarkdownPreviewClick} dangerouslySetInnerHTML={{ __html: editorPreviewHtml }} />
                         </div>
                       )}
                     </div>
@@ -4312,8 +4536,9 @@ const App: React.FC = () => {
                     <ExcalidrawEditor
                       key={currentFile}
                       content={currentContent}
-                      onChange={(val) => { setCurrentContent(val); setSaveStatus('unsaved'); }}
+                      onChange={handleEditorChange}
                       onSave={saveNow}
+                      onFlush={flushExcalidrawContent}
                       vaultPath={vaultPath || undefined}
                       fileName={currentFileName}
                     />
@@ -4364,7 +4589,7 @@ const App: React.FC = () => {
                           className="editor-welcome-btn"
                           disabled={teamWorkspaceOpening}
                           aria-busy={teamWorkspaceOpening}
-                          onClick={() => { void handleOpenObsidianTeamWorkspace(); }}
+                          onClick={() => { void handleOpenTeamWorkspace(); }}
                         >
                           <span className="editor-welcome-btn-title">Ars-note 团队工作台</span>
                           <span className="editor-welcome-btn-desc">
@@ -4408,13 +4633,13 @@ const App: React.FC = () => {
             </button>
             )}
             {/* Right panel wrapper */}
-            {settingsModalOpen && <div className="obsidian-settings-backdrop" onClick={closeSettingsModal} />}
+            {settingsModalOpen && <div className="ars-settings-backdrop" onClick={closeSettingsModal} />}
             <div className={'right-panel-wrapper' + (rightCollapsed && !settingsModalOpen ? ' collapsed' : '')}>
             {settingsModalOpen && (
-              <aside className="obsidian-settings-sidebar" aria-label="Settings categories">
-                <div className="obsidian-settings-nav-clean">
-                  <button type="button" className="obsidian-settings-back" onClick={closeSettingsModal}>←</button>
-                  <div className="obsidian-settings-label">选项</div>
+              <aside className="ars-settings-sidebar" aria-label="Settings categories">
+                <div className="ars-settings-nav-clean">
+                  <button type="button" className="ars-settings-back" onClick={closeSettingsModal}>←</button>
+                  <div className="ars-settings-label">选项</div>
                   {settingsNavItem('home', '常用设置')}
                   {settingsNavItem('about', '关于')}
                   {settingsNavItem('editor', '编辑器')}
@@ -4422,23 +4647,23 @@ const App: React.FC = () => {
                   {settingsNavItem('files', '文件与链接')}
                   {settingsNavItem('sync', '同步')}
                   {settingsNavItem('ai', 'AI')}
-                  <div className="obsidian-settings-label">核心插件</div>
+                  <div className="ars-settings-label">核心插件</div>
                   {settingsNavItem('recovery', '文件恢复')}
                   {settingsNavItem('commands', '命令面板')}
                   {settingsNavItem('preview', '页面预览')}
-                  <div className="obsidian-settings-label">第三方插件</div>
+                  <div className="ars-settings-label">第三方插件</div>
                   {settingsNavItem('ars-ai', 'Ars-note AI')}
                   {settingsNavItem('live-sync', 'Live Sync')}
                 </div>
               </aside>
             )}
             {settingsModalOpen && (
-              <button type="button" className="obsidian-settings-close" onClick={closeSettingsModal} aria-label="Close settings">×</button>
+              <button type="button" className="ars-settings-close" onClick={closeSettingsModal} aria-label="Close settings">×</button>
             )}
             <React.Suspense fallback={<LazyPanelFallback label="正在加载右侧工作区..." />}>
-            <RightPanel activeTab={rightTab} onTabChange={handleRightPanelTabChange} settingsSection={settingsModalSection} onSettingsSectionChange={setSettingsModalSection} previewContent={currentContent} searchQuery={searchQuery} searchResults={searchResults}
+            <RightPanel activeTab={rightTab} onTabChange={handleRightPanelTabChange} settingsSection={settingsModalSection} onSettingsSectionChange={setSettingsModalSection} previewContent={rightPanelDocumentContent} searchQuery={searchQuery} searchResults={searchResults}
               onSearch={handleSearch} onSearchResultClick={openFile} onCreateFromTemplate={handleCreateFromTemplate}
-              currentFilePath={currentFile} vaultPath={vaultPath}
+              currentFilePath={currentFile} vaultPath={vaultPath} vaultId={vault?.vaultId || ''}
               currentTags={currentTags} groupedIncomingLinks={groupedIncomingLinks} outgoingLinksInfo={outgoingLinksInfo}
               allVaultTags={allVaultTags} tagToNotesMap={tagToNotesMap}
               noteCount={noteCount} tagCount={tagCount}
@@ -4495,17 +4720,10 @@ const App: React.FC = () => {
               onNotify={showNotice}
               vaultIndex={vaultIndex}
               onReloadCurrentFile={reloadCurrentFile}
-              onJumpToLine={(line: number) => {
-                const view = editorRef.current?.getView();
-                if (view) {
-                  const pos = view.state.doc.line(Math.min(line, view.state.doc.lines)).from;
-                  view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
-                  view.focus();
-                }
-              }}
+              onJumpToLine={handleRightPanelJumpToLine}
               gameWorkspaceSummary={gameWorkspace.summary!}
               gameWorkspaceEntries={gameWorkspace.entries}
-              onOpenTeamWorkspace={handleOpenObsidianTeamWorkspace}
+              onOpenTeamWorkspace={handleOpenTeamWorkspace}
               onCreateGameDoc={handleCreateGameDoc}
               onCreateNarrativeProductionKit={handleCreateNarrativeProductionKit}
               gameDocCreating={gameDocCreating}
@@ -4517,7 +4735,7 @@ const App: React.FC = () => {
               arshisExporting={arshisExporting}
               arshisExportMsg={arshisExportMsg}
               aiConfig={aiConfig}
-              onAISaveConfig={async () => { await handleAISaveConfig({ provider: aiFormProvider as any, baseUrl: aiFormBaseUrl, model: aiFormModel, hasApiKey: !!aiFormApiKey, enabled: true }); }}
+              onAISaveConfig={handleRightPanelAISaveConfig}
               onAITestConnection={handleAITestConnection}
               onAIClearConfig={handleAIClearConfig}
               aiTesting={aiTesting}
@@ -4526,12 +4744,7 @@ const App: React.FC = () => {
               aiFormBaseUrl={aiFormBaseUrl}
               aiFormModel={aiFormModel}
               aiFormApiKey={aiFormApiKey}
-              onAIFormChange={(field: string, value: string) => {
-                if (field === 'provider') setAiFormProvider(value);
-                else if (field === 'baseUrl') setAiFormBaseUrl(value);
-                else if (field === 'model') setAiFormModel(value);
-                else if (field === 'apiKey') setAiFormApiKey(value);
-              }}
+              onAIFormChange={handleRightPanelAIFormChange}
               aiChatMessages={aiChatMessages}
               aiInput={aiInput}
               aiContextMode={aiContextMode}
@@ -4546,22 +4759,14 @@ const App: React.FC = () => {
               onAIControlModeChange={setAiControlMode}
               onAISendChat={handleAISendChat}
               onAICancelChat={handleAICancelChat}
-              onAIRetryLast={() => handleAISendChat(aiRetryPrompt)}
+              onAIRetryLast={handleRightPanelAIRetry}
               onAIImportTasksToSchedule={handleAIImportTasksToSchedule}
-              onRefreshVault={async () => {
-                await refreshTree();
-                await refreshIndex();
-              }}
-              onAICopyResponse={() => {
-                const lastAssistant = [...aiChatMessages].reverse().find(m => m.role === 'assistant');
-                if (lastAssistant) {
-                  navigator.clipboard.writeText(lastAssistant.content).then(() => { setAiCopiedResponse(true); setTimeout(() => setAiCopiedResponse(false), 2000); }).catch(() => {});
-                }
-              }} />
+              onRefreshVault={handleRightPanelRefreshVault}
+              onAICopyResponse={handleRightPanelCopyResponse} />
             </React.Suspense>
             </div>{/* end right-panel-wrapper */}
           </div>
-          <StatusBar filePath={currentFileRelPath} fileName={currentFileName} isDirty={isDirty} saving={saveStatus === 'saving'} saveStatus={saveStatusText} hasVault={!!vault} content={currentContent} appVersion={APP_VERSION_LABEL} vaultName={vault?.name} focusMode={focusMode} onToggleFocus={() => setFocusMode(p => !p)} onOpenShortcuts={() => setShowShortcutGuide(true)} />
+          <StatusBar filePath={currentFileRelPath} fileName={currentFileName} isDirty={isDirty} saving={saveStatus === 'saving'} saveStatus={saveStatusText} hasVault={!!vault} content={deferredCurrentContent} appVersion={APP_VERSION_LABEL} vaultName={vault?.name} focusMode={focusMode} onToggleFocus={handleToggleFocusMode} onOpenShortcuts={handleOpenShortcutGuide} />
         </React.Suspense>
       )}
       {showNewFile && <NewItemDialog title={t.newMarkdownFile} placeholder={t.filenamePlaceholder} onConfirm={handleNewFile} onCancel={() => setShowNewFile(false)} />}

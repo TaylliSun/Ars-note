@@ -33,6 +33,9 @@ function main() {
   const apiKeySet = !!process.env.ARS_NOTE_SERVER_API_KEY;
   const port = process.env.ARSNOTE_PORT || '3141';
   const host = process.env.ARSNOTE_HOST || '127.0.0.1';
+  const securityMode = (process.env.ARS_NOTE_SECURITY_MODE || 'lan').toLowerCase();
+  const trustProxy = process.env.ARS_NOTE_TRUST_PROXY === 'true';
+  const requireHttps = securityMode === 'public' || process.env.ARS_NOTE_REQUIRE_HTTPS === 'true';
 
   console.log('═══════════════════════════════════════');
   console.log('  Ars-note Server Configuration Summary');
@@ -98,6 +101,10 @@ function main() {
   /* Security notes */
   console.log('  Security:');
   console.log(`    API key set:      ${apiKeySet ? 'YES' : 'NO (dev mode — no auth)'}`);
+  console.log(`    Mode:             ${securityMode}`);
+  console.log(`    HTTPS required:   ${requireHttps ? 'YES' : 'NO'}`);
+  console.log(`    Trusted proxy:    ${trustProxy ? 'YES' : 'NO'}`);
+  console.log(`    URL credentials:  ${process.env.ARS_NOTE_ALLOW_API_KEY_IN_QUERY === 'true' ? 'LEGACY ENABLED' : 'DISABLED'}`);
   console.log(`    Secrets printed:  NO`);
   console.log('');
 

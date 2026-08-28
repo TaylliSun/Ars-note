@@ -559,7 +559,8 @@ const zhCN: Translations = {
   copiedResponse: '已复制！',
   aiNoResponse: '暂无回复',
   aiChatPlaceholder: '询问你的游戏项目...',
-  humanizeCurrentText: '润色去AI味',
+  humanizeCurrentText: '中英去 AI 化',
+  professionalizeCurrentDesign: '专业化当前策划',
   summarizeCurrentNote: '总结当前笔记',
   professionalDesignReview: '专业策划评审',
   designCoreGameplayLoop: '设计核心循环',
@@ -680,7 +681,7 @@ const zhCN: Translations = {
   designDocs: '设计',
   devDocs: '开发',
   /* ── v1.2.4 AI Panel UI Polish ── */
-  aiSafetyNote: 'AI 写入、删除、任务表和生产文档工具会先生成预览与确认码；只有你确认后才会执行。API 密钥仅存储在内存中。',
+  aiSafetyNote: '在成员执行或制作人接管模式下，AI 会按你的明确要求直接写入、删除或更新任务；系统自动保存历史、回收副本和回滚快照。API 密钥仅存储在内存中。',
   aiContextCurrentNoteDesc: 'AI 将读取你当前笔记作为上下文。',
   aiContextGameWorkspaceDesc: 'AI 将使用团队工作台、文档雷达和任务摘要作为上下文。',
   aiContextArshisContextDesc: 'AI 将使用 Arshis 游戏上下文导出。',

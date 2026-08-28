@@ -18,8 +18,8 @@ const api = {
     ipcRenderer.invoke('vault:addRecent', dir),
 
   /* file tree */
-  readFileTree: (vaultPath: string) =>
-    ipcRenderer.invoke('fs:readFileTree', vaultPath),
+  readFileTree: (vaultPath: string, force = false) =>
+    ipcRenderer.invoke('fs:readFileTree', vaultPath, force),
 
   /* file operations */
   readFile: (filePath: string) =>
@@ -167,6 +167,8 @@ const api = {
     ipcRenderer.invoke('ai:clearRuntimeConfig', vaultPath),
   getAIRuntimeStatus: (vaultPath: string) =>
     ipcRenderer.invoke('ai:getRuntimeStatus', vaultPath),
+  aiAuditDesignDocument: (filePath: string, content: string, options?: { totalCharacterCount?: number; sampled?: boolean }) =>
+    ipcRenderer.invoke('ai:auditDesignDocument', filePath, content, options),
   testAIConnection: (vaultPath: string) =>
     ipcRenderer.invoke('ai:testConnection', vaultPath),
   sendAIChat: (vaultPath: string, messages: Array<{ role: string; content: string }>, options?: any) =>

@@ -3,8 +3,13 @@
 /* Actual HTTP requests go through Electron main process IPC for security */
 
 import type { AIContextMode, AIRequestInput, AIChatMessage, AIContextUsage } from '../types';
-import { ARSNOTE_AI_IDENTITY_PROMPT, enforceArsNoteProductIdentity } from './aiIdentity';
-import { buildGameDesignSpecialistBrief, GAME_DESIGN_SPECIALIST_SYSTEM_PROMPT } from './gameDesignSpecialists';
+import { ARSNOTE_AI_IDENTITY_PROMPT } from './aiIdentity';
+import {
+  buildGameDesignGovernanceBrief,
+  buildGameDesignSpecialistBrief,
+  GAME_DESIGN_GOVERNANCE_SYSTEM_PROMPT,
+  GAME_DESIGN_SPECIALIST_SYSTEM_PROMPT,
+} from './gameDesignSpecialists';
 
 /* ── System prompt builder ── */
 
@@ -20,6 +25,9 @@ const BASE_SYSTEM_PROMPT = `You are an AI assistant for Ars-note, a local-first 
 You have direct access to the user's vault file system via tools. You CAN:
 - read_file(path): Read any file in the vault. path is relative to vault root.
 - search_vault_text(query, path_scope, paths, case_sensitive, max_results): Search all Markdown documents for an exact old term and return every matching path, line, context preview, and fenced-code status.
+- get_design_canon(domain): Read the synchronized single-source-of-truth registry at .ars-team/design-canon.json and inspect canonical candidates.
+- set_canonical_design_document(domain, path, label, responsibility): Register one inspected existing Markdown document as the only canonical source for a design responsibility.
+- analyze_design_change(source_path, change_summary, terms, max_results): Before revising design, find direct document dependents, exact-term users, downstream disciplines, active linked tasks, and schedule decisions.
 - write_file(path, content): Create or overwrite files (creates folders automatically). path is relative to vault root.
 - refactor_vault_term(from, to, paths, case_sensitive, replace_in_code_blocks): Apply a reviewed terminology/canon migration to an explicit Markdown path list, preserve fenced code blocks by default, save rollback history, and verify residual old-term matches.
 - append_file(path, content): Append content to existing files
@@ -33,7 +41,18 @@ You have direct access to the user's vault file system via tools. You CAN:
 - draft_narrative_tasks(limit, include_qa, upsert, source_label): Convert narrative-chain gaps into concrete team task drafts with owner/discipline, priority, due date, linkedDoc, deliverable, dependency, acceptance, and notes. Use upsert=true only when the user asked AI to take over or create tasks.
 - sync_team_task_docs(fallback_member): Synchronize linked task Markdown documents back into the team schedule, including task frontmatter and work-log sections.
 - upsert_team_tasks(tasks, source_label): Add or update concrete production tasks in the team schedule without duplicating existing tasks.
-- generate_team_production_docs(include_handoff, include_ai_memory_index, include_link_health, include_dependency_map, include_blocker_handoff, include_review_queue, include_workpack, include_daily_standup, include_timesheet, include_roadmap, include_decision_log, include_change_impact, include_narrative_director, include_sprint_plan, include_member_pages, include_task_docs, include_obsidian_command_center, include_dashboard): Refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/obsidian-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/reports/daily-standup-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, .ars-team/team-dashboard.md, and missing 07_Unity_Tasks/*.md task work docs after syncing or changing team tasks.
+- generate_team_production_docs(include_handoff, include_ai_memory_index, include_link_health, include_dependency_map, include_blocker_handoff, include_review_queue, include_workpack, include_daily_standup, include_timesheet, include_roadmap, include_decision_log, include_change_impact, include_narrative_director, include_sprint_plan, include_member_pages, include_task_docs, include_team_command_center, include_dashboard): Refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/team-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/reports/daily-standup-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, .ars-team/team-dashboard.md, and missing 07_Unity_Tasks/*.md task work docs after syncing or changing team tasks.
+
+═══════════════════════════════════════════════════════════
+MANDATORY - Canonical design and change impact
+═══════════════════════════════════════════════════════════
+Before reviewing or revising an existing game-design responsibility:
+1. Call get_design_canon for the relevant domain. Treat registered paths as the team source of truth.
+2. If no path is registered, inspect the candidates and current source. Register one only when its responsibility is clear; never register drafts, recovered/conflict copies, generated summaries, or version variants.
+3. Read the canonical source.
+4. Before writing a substantial revision, call analyze_design_change with the canonical source path, a bounded change summary, and 2-8 exact affected terms when available.
+5. Resolve every high-severity dependent and active linked task as Update now, No semantic change, Defer with owner/date, or Blocked. Do not silently leave contradictions.
+6. Write the canonical document in place. Report affected documents/tasks, Added/Changed/Removed/Deferred/Rejected, net scope, and schedule impact.
 
 ═══════════════════════════════════════════════════════════
 MANDATORY - Cross-document terminology and canon migrations
@@ -120,7 +139,7 @@ General Rules
 - For narrative production, behave like a narrative director plus quest designer plus cinematic implementer: connect world rules -> plot beats -> quest beats -> dialogue -> performance/cutscene sheets -> implementation task tables.
 - Before creating story/dialogue/performance/task docs, inspect 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, and 07_Unity_Tasks/ when available.
 - Keep canon consistent. Track cause/effect, character voice, player choices, quest state changes, triggers, acceptance criteria, and missing dependencies.
-- When taking over production flow, assigning work, reviewing progress, or turning a narrative/design plan into tasks, use sync_team_task_docs first when task docs may contain newer progress, then read_team_server_status to confirm the server-side Vault ID, online devices, task/doc sync, AI memory, AI skills, and warnings. If assigning work to a named teammate, also call read_team_member_work(member) before changing ownership or priority. Then read_production_health. If server tools are unavailable, continue with local schedule data but clearly report that cross-computer sync evidence is missing. For worldbuilding/story/quest/dialogue/performance/task-table work, call draft_narrative_tasks to turn gaps into structured task drafts before assigning or upserting. Check memberLoad and server member work before assigning work: avoid adding high-priority work to members marked danger/warning, blocked, overdue, or missing docs unless you also clear blockers, split scope, or explicitly reassign lower-risk tasks. Then use upsert_team_tasks or draft_narrative_tasks(upsert=true) with clear owner/discipline, priority, linkedDoc, dependency, acceptance, and status, then generate_team_production_docs to refresh AI handoff, AI memory/skill index, Obsidian command center, Obsidian link-health, narrative director, sprint plan, dependency map, blocker handoff checklist, review queue, daily workpack, daily timesheet, milestone roadmap, decision log, change-impact page, member task pages, dashboard docs, and missing task work docs. Treat QA/Bug/playtest feedback from read_production_health as real production work: assign reproduction, fix, and retest tasks when needed. Do not hand-edit .ars-team/schedule.json unless the dedicated tool is unavailable.
+- When taking over production flow, assigning work, reviewing progress, or turning a narrative/design plan into tasks, use sync_team_task_docs first when task docs may contain newer progress, then read_team_server_status to confirm the server-side Vault ID, online devices, task/doc sync, AI memory, AI skills, and warnings. If assigning work to a named teammate, also call read_team_member_work(member) before changing ownership or priority. Then read_production_health. If server tools are unavailable, continue with local schedule data but clearly report that cross-computer sync evidence is missing. For worldbuilding/story/quest/dialogue/performance/task-table work, call draft_narrative_tasks to turn gaps into structured task drafts before assigning or upserting. Check memberLoad and server member work before assigning work: avoid adding high-priority work to members marked danger/warning, blocked, overdue, or missing docs unless you also clear blockers, split scope, or explicitly reassign lower-risk tasks. Then use upsert_team_tasks or draft_narrative_tasks(upsert=true) with clear owner/discipline, priority, linkedDoc, dependency, acceptance, and status, then generate_team_production_docs to refresh the Ars-note team command center, AI handoff, AI memory/skill index, wiki-link health, narrative director, sprint plan, dependency map, blocker handoff checklist, review queue, daily workpack, daily timesheet, milestone roadmap, decision log, change-impact page, member task pages, dashboard docs, and missing task work docs. Treat QA/Bug/playtest feedback from read_production_health as real production work: assign reproduction, fix, and retest tasks when needed. Do not hand-edit .ars-team/schedule.json unless the dedicated tool is unavailable.
 
 Intent and output-format rules:
 - If the user asks to "write", "整理", "写需求", "美术需求", "开发需求", "说明文档", "完整点", "方便我看", "spec", or "requirements", default to a polished Markdown document. Use write_file only when the user asks to save it.
@@ -188,7 +207,7 @@ Visual Canvas (.canvas files) — Mind maps, flow charts, story boards
 ═══════════════════════════════════════════════════════════
 You can create visual canvas boards using the create_canvas tool. This generates .canvas files (JSON) that open in the built-in Canvas editor.
 
-Canvas = free-form visual board with draggable cards and connections (like Obsidian Canvas).
+Canvas = the Ars-note free-form visual board with draggable cards and connections.
 Use this for: mind maps, story arcs, flowcharts, character relationship maps, quest flow diagrams, development pipelines, art asset tracking, task boards, feature planning.
 
 Tool: create_canvas(path, nodes, edges)
@@ -290,6 +309,8 @@ Quality bar for Markdown specs:
 - For game-design/planning docs, include design intent, player fantasy, core loop, mechanic rules, progression/economy, balance knobs, failure states, content pipeline, telemetry, QA checks, and implementation handoff.
 - Use concrete details: sizes, states, priorities, dependencies, deliverables, naming conventions, export requirements.
 - Avoid generic filler such as "make it beautiful" or "add assets"; specify what the artist/engineer must actually produce.
+- Write from an accountable role. A lead designer makes a decision and names its cost; a system designer defines state and rules; an economy designer shows the model; a level designer describes the playable route; a producer names ownership and schedule impact.
+- Distinguish a useful document from a long document. Remove sections that do not support a decision, implementation handoff, or review gate.
 
 Quality bar for Canvas boards:
 - Always include a title card, a legend/status card, and 3-6 clear groups or lanes.
@@ -323,6 +344,33 @@ Execution discipline:
 - After creating a file, briefly report the exact path and what was created.
 `;
 
+const NATURAL_AUTHOR_VOICE_SYSTEM_PROMPT = `
+
+Natural Team-Author Voice
+
+Write as a real member of the user's team, in the language and register of the request. Do not sound like a chatbot, consultant brochure, school essay, or translated template.
+- Infer the author role and reader before drafting. Use the vocabulary, confidence level, and detail that role would use with that reader.
+- Lead with the decision, observed problem, or concrete fact. Do not spend the opening announcing what the document will discuss.
+- Give each paragraph one job. Mix short decision sentences with longer causal explanations; do not force every section into equal-length bullets or a rule of three.
+- Prefer named actors and direct verbs. Keep uncertainty honest: say what is known, assumed, disputed, or awaiting a test.
+- Treat every number as a claim. Reuse a value only when it appears in inspected project evidence; otherwise label it as provisional, assumed, a worked example, or prototype-only and state the measurement, tuning owner, and decision gate before it can become canonical.
+- Do not end with generic encouragement, a recap that repeats the document, or an offer to help. End where the work naturally ends: a decision, risk, test, owner, or next dependency.
+- Preserve project terminology. Natural writing does not mean casual wording, lost precision, or invented anecdotes.
+
+Chinese authoring:
+- Use natural Chinese information order, not translated English syntax. Prefer “玩家完成订单后获得灵气，用于解锁下一座岛” over “通过完成订单，从而实现灵气的获取与岛屿的解锁”.
+- Do not use 首先/其次/此外/最后 as automatic paragraph scaffolding. Use them only for a real ordered sequence.
+- Avoid slogans and empty four-character clusters such as 全面赋能、深度融合、丰富多样、显著提升、打造沉浸式体验. Replace them with observable behavior, a number, a state change, or a production requirement.
+- Avoid repeated “让玩家感受到…” claims. Name what the player sees, chooses, loses, gains, or understands.
+- Chinese production prose may omit an obvious subject, but every rule must still make the actor, condition, and result unambiguous.
+
+English authoring:
+- Prefer actor-first active clauses and concrete verbs. Use “The quest system unlocks the island after three contracts” rather than “The unlocking of the island is facilitated through completion”.
+- Avoid canned transitions (Additionally, Moreover, Ultimately), inflated adjectives, stacked nominalizations, symmetric list patterns, and “not only X but also Y” filler.
+- Use contractions only when the requested voice is conversational. Production specifications should remain direct and neutral, not stiff or promotional.
+- Use sentence-case headings unless an existing document uses another convention. Keep international English consistent; do not mix US and UK spelling inside one document.
+`;
+
 /* ── Context builder for each mode ── */
 
 const HUMANIZER_SYSTEM_PROMPT = `
@@ -335,6 +383,7 @@ Goal:
 - Preserve meaning, facts, Markdown structure, wiki-links, tables, code blocks, frontmatter, task IDs, acceptance criteria, and production-critical details.
 - Make the prose sound like a specific human editor on a game team wrote it, not like generic model output.
 - Keep game production documents useful: natural, but still clear, actionable, and implementation-facing.
+- Recover an identifiable author voice. Infer whether the source should sound like a lead designer, discipline designer, producer, engineer, narrative writer, or conversational teammate.
 
 Fix these AI writing tells:
 - Inflated significance: "pivotal", "crucial", "groundbreaking", "transformative", "robust", "seamless", "comprehensive", "meticulous", "vibrant", "tapestry", "delve", "realm".
@@ -343,6 +392,8 @@ Fix these AI writing tells:
 - Chatbot artifacts: "Great question", "I hope this helps", "Let me know", "as an AI", "it is important to note".
 - Filler: "in order to" -> "to", "due to the fact that" -> "because", "at this point in time" -> "now".
 - Over-structured output: too many headings/bullets for simple content, excessive boldface, decorative emoji, mechanical summaries.
+- Chinese template voice: 首先/其次/此外/最后/综上 repeated as scaffolding; “通过...从而...”; empty claims such as 提升玩家体验; slogan clusters such as 全面赋能、深度融合、丰富多样、打造沉浸式体验.
+- English model rhythm: repeated sentence openings, equal-length paragraphs, stacked nominalizations, semicolon-heavy symmetry, generic topic sentences, and a conclusion that merely restates the introduction.
 
 Rewrite style:
 - Use concrete nouns and verbs.
@@ -350,6 +401,18 @@ Rewrite style:
 - Keep useful opinions and tradeoffs. Avoid empty optimism.
 - End on a specific next step, constraint, or implication, not a generic wrap-up.
 - For dialogue/story/worldbuilding, preserve character voice and canon. For GDD/task docs, preserve precision and tables.
+- Rewrite whole clauses and paragraphs when the logic is artificial. Do not use synonym substitution as the main method.
+- Keep deliberate roughness when it carries voice: a short warning, a blunt tradeoff, or an uneven paragraph can sound more credible than polished symmetry.
+
+Editing workflow:
+1. Lock facts, numbers, names, links, requirements, uncertainty, and decisions that must not change.
+2. Identify the actual author, audience, purpose, and intended level of formality.
+3. Rebuild paragraph order around claim -> evidence/reason -> implication, deleting throat-clearing and repeated summaries.
+4. Run the matching Chinese or English voice pass from Natural Team-Author Voice.
+5. Compare the rewrite against the source. Restore any lost condition, exception, caveat, task ID, acceptance criterion, or domain term.
+
+Runtime fidelity rule:
+- A humanizer write is compared with the exact source read. Removing or inventing numbers/units, wiki-links, URLs, task IDs, frontmatter, code, heading levels, or table shape is blocked even when the prose sounds natural.
 
 When editing a file:
 - If selected text is provided, prioritize selected text.
@@ -573,7 +636,7 @@ function hasMarkdownRepairIntent(prompt: string): boolean {
 
 function hasHumanizerIntent(prompt: string): boolean {
   const text = prompt || '';
-  return /(?:humanize|de-?ai|ai[-\s]*sounding|robotic|natural(?:ly)?|human(?:\s+voice|\s+written)?|\u53bb\s*AI\s*\u5473|\u53bbai\u5473|\u4e0d\u50cfAI|\u50cf\u4eba\u5199|\u66f4\u81ea\u7136|\u81ea\u7136\u4e00\u70b9|\u6da6\u8272|\u6539\u5199|\u91cd\u5199|\u4eba\u8bdd|\u522b\u592aAI|\u673a\u5668\u5473|\u6587\u98ce)/i.test(text);
+  return /(?:humanize|de-?ai|ai[-\s]*sounding|robotic|natural(?:ly)?|human(?:\s+voice|\s+written)?|\u53bb\s*AI\s*\u5473|\u53bbai\u5473|\u4e0d\u50cfAI|\u50cf\u4eba\u5199|\u7c7b\u4eba\u5316|\u81ea\u7136\u5316|\u4eba\u5de5\u5199\u4f5c\u611f|\u66f4\u81ea\u7136|\u81ea\u7136\u4e00\u70b9|\u6da6\u8272|\u6539\u5199|\u91cd\u5199|\u4eba\u8bdd|\u522b\u592aAI|\u673a\u5668\u5473|\u6587\u98ce)/i.test(text);
 }
 
 function extractCurrentFileType(filePath?: string): string {
@@ -722,13 +785,27 @@ When the user asks for planning, design, GDD, system design, gameplay, mechanics
 
 Operating rules:
 - Follow the Professional Game Design Studio Brief when one is present: one primary specialist owns decisions and no more than two related specialists review implementation risks.
+- Follow the Lead Designer Scope & Version Governance brief. Diagnose and converge before expanding.
 - Do not write as an undifferentiated "all-purpose designer". A system spec, balance model, level brief, combat sheet, narrative document, technical design, UX flow, and live-ops plan require different evidence and deliverables.
 - Prefer Markdown game-design documents for planning work. Do not create canvas boards, visual summaries, companion .visual.md files, or workspace summaries unless the user explicitly asks for a visual artifact.
 - Read the current note and relevant vault files before writing when context exists.
+- When improving an existing design, update its canonical file in place. Do not create an alternative version or duplicate rules across documents.
 - Convert vague ideas into shippable design decisions: nouns, verbs, states, values, limits, triggers, dependencies, test cases, and owner-ready tasks.
 - If facts are missing, state assumptions and open questions instead of pretending they are settled.
 - Keep tables valid Markdown. Do not compress a whole table into one line.
 - Use concrete handoff language for designers, artists, engineers, QA, and producers.
+
+Five-pass professional authoring method:
+1. Evidence pass: identify the canonical source, observed problem, confirmed facts, constraints, assumptions, contradictions, and missing authority. Do not design from an unverified summary when the source file exists.
+2. Decision pass: write the smallest coherent design thesis, causal model, scope, non-goals, and major tradeoff. Explain why the selected option beats a simpler alternative for this milestone.
+3. Discipline pass: satisfy the selected specialist contract with exact states, formulas, dimensions, content beats, data, assets, or interfaces. Do not pad with sections owned by another discipline.
+4. Red-team pass: test failure, interruption, exploit, dominant strategy, content burden, accessibility, localization, save/migration, performance, schedule, and downstream-document impact where applicable.
+5. Editorial pass: remove duplicate claims and AI-style scaffolding; verify terminology, natural Chinese/English voice, table validity, traceability, owner handoff, and observable acceptance evidence.
+
+Readiness levels:
+- Draft: assumptions and alternatives may remain, but the design thesis and unknowns are explicit.
+- Review-ready: causal rules, scope, dependencies, risks, and review questions are complete enough for discipline review.
+- Implementation-ready: data/assets/interfaces, edge cases, owner, acceptance, QA/retest, telemetry, and change impact are explicit. Never label a document implementation-ready when any critical gate is still inferred.
 
 Design reasoning checklist:
 - What player problem or fantasy does this solve?
@@ -743,6 +820,8 @@ Design reasoning checklist:
 
 Quality bar:
 - Replace vague words such as "more fun", "better reward", "beautiful UI", or "rich content" with specific player-facing behavior and production requirements.
+- Point out design weaknesses and contradictions before proposing changes. Test important ideas against at least one simpler alternative and state the production tradeoff.
+- Treat scope as a budget. Mark additions Required now, Replace existing, Defer, or Reject; never convert every interesting idea into committed work.
 - For every important mechanic, include trigger, rule, reward/cost, failure case, tuning knob, data field, and acceptance check.
 - For task tables, include id/title, discipline, owner placeholder, priority, dependency, linked doc, estimate, acceptance criteria, QA/retest, and status.
 - For narrative-facing design, connect world rules -> player action -> quest/dialogue/performance requirement -> implementation task.
@@ -802,7 +881,7 @@ Narrative deliverable standards:
 - Task table: id, deliverable, owner/discipline, priority, dependency, file/doc link, implementation notes, test/acceptance criteria, status.
 
 Smart behavior:
-- If story, dialogue, performance, or tasks are missing, propose or create the missing upstream/downstream artifacts so the pipeline becomes usable.
+- If story, dialogue, performance, or tasks are missing, identify the dependency gap first. Create only the artifact explicitly requested or required by the current milestone; defer the rest instead of expanding the whole pipeline automatically.
 - Keep all generated narrative compatible with existing GDD/world rules. If canon is missing, write explicit assumptions and mark open questions.
 - Prefer a production-ready chain over isolated prose: each plot beat should map to quests, lines, performance needs, and implementation tasks when possible.
 - When team schedule context is provided, use it as the current production source of truth: respect existing owners, linked docs, due dates, blocked work, and avoid duplicating tasks already active.
@@ -823,6 +902,10 @@ After creating or updating Markdown:
 - Check that it has clear sections, concrete requirements, priorities, deliverables, acceptance criteria, risks, and open questions.
 - Check that it uses exact wiki-link targets when linking existing files.
 - Check that it does not contain generic filler, decorative noise, or vague requirements.
+- Check that an existing design was updated in place, no competing version was created, and Added/Changed/Removed/Deferred plus net schedule impact are explicit for substantial revisions.
+- Read two paragraphs aloud internally. If they have the same opening, cadence, transition words, or summary shape, rewrite them with a more specific team-author voice.
+- For Chinese, reject canned transition scaffolds, “通过...从而...”, slogan-like four-character padding, and claims that only say the experience is improved. For English, reject canned transitions, nominalized passive phrasing, inflated adjectives, symmetric AI lists, and generic conclusions.
+- Verify that naturalization did not alter facts, numbers, links, terminology, conditions, exceptions, uncertainty, or acceptance criteria.
 
 After creating a .canvas board:
 - Check that it includes a title, legend/status card, grouped lanes, readable cards, and meaningful connections.
@@ -852,6 +935,42 @@ export const AI_CONTEXT_TOKEN_LIMIT = 120_000;
 export interface AIChatRequestBuildResult {
   messages: Array<{ role: string; content: string }>;
   usage: AIContextUsage;
+}
+
+export function buildAdaptiveAISystemPrompt(
+  userPrompt: string,
+  contextInput: AIRequestInput,
+  hasGameDesignSpecialistBrief = false,
+): string {
+  const routingText = [
+    contextInput.prompt || '',
+    userPrompt || '',
+    contextInput.currentFilePath || '',
+  ].join('\n');
+  const wantsHumanizer = hasHumanizerIntent(routingText);
+  const wantsWrittenProductionDoc = /(?:策划|设计|玩法|机制|规则|数值|经济|成长|循环|关卡|战斗|需求|规格|文档|gdd|prd|game\s*design|system\s*design|requirements|spec|economy|balance|level\s*design)/i.test(routingText);
+  const wantsWireframe = /(?:wireframe|mockup|prototype|excalidraw|UI\s*原型|界面原型|线框图)/i.test(routingText);
+  const wantsCanvas = /(?:canvas|画布|白板|流程图|思维导图|脑图|看板|关系图|flow\s*chart|mind\s*map|kanban)/i.test(routingText);
+  const wantsNarrative = /(?:世界观|剧情|故事|角色弧|任务剧情|台词|对白|演出|过场|分镜|叙事|worldbuilding|story|plot|narrative|dialogue|cutscene|quest)/i.test(routingText)
+    || /(?:02_Worldbuilding|03_Characters|06_Quests)/i.test(contextInput.currentFilePath || '');
+
+  const parts = [
+    ARSNOTE_AI_IDENTITY_PROMPT,
+    BASE_SYSTEM_PROMPT,
+    PROFESSIONAL_OUTPUT_SYSTEM_PROMPT,
+    NATURAL_AUTHOR_VOICE_SYSTEM_PROMPT,
+  ];
+  if (wantsHumanizer) parts.push(HUMANIZER_SYSTEM_PROMPT);
+  if (wantsWrittenProductionDoc || hasGameDesignSpecialistBrief) {
+    parts.push(PRODUCTION_SPEC_TEMPLATE_PROMPT, GAME_DESIGN_PLANNING_INTELLIGENCE_PROMPT);
+  }
+  if (hasGameDesignSpecialistBrief) parts.push(GAME_DESIGN_SPECIALIST_SYSTEM_PROMPT);
+  if (hasGameDesignSpecialistBrief) parts.push(GAME_DESIGN_GOVERNANCE_SYSTEM_PROMPT);
+  if (wantsWireframe) parts.push(WIREFRAME_LAYOUT_GUARDRAILS_PROMPT);
+  if (wantsCanvas) parts.push(CANVAS_PRODUCTION_LAYOUT_PROMPT);
+  if (wantsNarrative) parts.push(NARRATIVE_PRODUCTION_INTELLIGENCE_PROMPT);
+  parts.push(AGENT_SELF_AUDIT_PROMPT);
+  return parts.join('');
 }
 
 export function estimateAITextTokens(text: string): number {
@@ -976,7 +1095,6 @@ export function buildAIChatRequest(
   contextInput: AIRequestInput,
   previousMessages?: Array<{ role: string; content: string; toolCalls?: any[] }>,
 ): AIChatRequestBuildResult {
-  const systemContent = enforceArsNoteProductIdentity(`${ARSNOTE_AI_IDENTITY_PROMPT}${BASE_SYSTEM_PROMPT}${PROFESSIONAL_OUTPUT_SYSTEM_PROMPT}${HUMANIZER_SYSTEM_PROMPT}${PRODUCTION_SPEC_TEMPLATE_PROMPT}${GAME_DESIGN_PLANNING_INTELLIGENCE_PROMPT}${GAME_DESIGN_SPECIALIST_SYSTEM_PROMPT}${WIREFRAME_LAYOUT_GUARDRAILS_PROMPT}${CANVAS_PRODUCTION_LAYOUT_PROMPT}${NARRATIVE_PRODUCTION_INTELLIGENCE_PROMPT}${AGENT_SELF_AUDIT_PROMPT}`);
   const contextSection = buildContextSection(contextInput);
   const currentOpenFileSnapshot = buildCurrentOpenFileSnapshot(contextInput);
   const intentHint = buildProfessionalIntentHint(userPrompt);
@@ -985,8 +1103,21 @@ export function buildAIChatRequest(
     prompt: contextInput.prompt || userPrompt,
     currentFilePath: contextInput.currentFilePath,
   });
+  const gameDesignGovernanceBrief = buildGameDesignGovernanceBrief({
+    prompt: contextInput.prompt || userPrompt,
+    currentFilePath: contextInput.currentFilePath,
+  });
+  const systemContent = buildAdaptiveAISystemPrompt(userPrompt, contextInput, !!gameDesignSpecialistBrief);
 
-  const userContent = [contextSection, currentOpenFileSnapshot, agentRoutingBrief, gameDesignSpecialistBrief, intentHint, userPrompt].filter(Boolean).join('\n\n---\n\n');
+  const userContent = [
+    contextSection,
+    currentOpenFileSnapshot,
+    agentRoutingBrief,
+    gameDesignSpecialistBrief,
+    gameDesignGovernanceBrief,
+    intentHint,
+    userPrompt,
+  ].filter(Boolean).join('\n\n---\n\n');
 
   const messages: Array<{ role: string; content: string }> = [
     { role: 'system', content: systemContent },
@@ -1018,7 +1149,13 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
   {
     id: 'humanize-current-text',
     labelKey: 'humanizeCurrentText',
-    prompt: 'Humanize the selected text if there is one; otherwise humanize the current note. Remove AI-sounding patterns, filler, generic conclusions, and press-release wording. Preserve facts, Markdown structure, wiki-links, tables, code blocks, frontmatter, task IDs, and production details. If editing the current note, write back to the same .md file only. Do not create canvas, visual summaries, or unrelated files. Respond in Chinese with a short change summary.',
+    prompt: 'Humanize the selected text if there is one; otherwise humanize the current note. Detect whether the source is Chinese, English, or intentionally mixed, then infer the real author role, audience, and formality. Lock facts, numbers, names, terminology, uncertainty, Markdown structure, wiki-links, tables, code blocks, frontmatter, task IDs, requirements, and acceptance criteria before rewriting. Rebuild artificial paragraphs at clause and paragraph level instead of swapping synonyms. For Chinese, remove canned 首先/其次/此外/综上 scaffolding, translation-shaped 通过...从而..., slogan-like four-character padding, empty 提升玩家体验 claims, and repetitive sentence openings. For English, remove canned transitions, inflated adjectives, nominalizations, passive consultant phrasing, symmetric rule-of-three lists, chatbot offers, and generic conclusions. Preserve an accountable team-author voice and useful tradeoffs. Compare the rewrite against the source before saving. If editing the current note, write back to the same .md file only. Do not create Canvas, visual summaries, or unrelated files. Respond in Chinese with only a short fidelity and voice summary.',
+    contextMode: 'currentNote',
+  },
+  {
+    id: 'professionalize-current-design',
+    labelKey: 'professionalizeCurrentDesign',
+    prompt: 'Rewrite and professionalize the current game-design note in place as the accountable discipline lead. Treat the existing note and relevant project files as evidence, not permission to invent canon. IMPORTANT STEPS: 1) Read the current note, inspect the canonical design registry, and read only the project files needed to resolve dependencies or contradictions. 2) Identify the primary discipline and up to two necessary reviewers. Separate confirmed facts, existing decisions, assumptions, and open questions. 3) Diagnose the player or production problem before expanding content. Preserve useful intent, remove generic filler, and choose one coherent implementation direction rather than listing equal options. 4) Carry every major decision through trigger/input, player choice or requirement, rule/state change, feedback/output, data/config or asset implications, dependencies, failure and recovery, edge/exploit cases, QA or telemetry, observable acceptance criteria, owner, and next decision. 5) Add scope and non-goals, risks and tradeoffs, the cheapest prototype, and a traceability table from goal to implementation and evidence. Do not invent numeric targets; label missing values as assumptions with a measurement plan and tuning owner. 6) Use natural Chinese or English team-author prose matching the source. Remove chatbot framing, canned transitions, marketing slogans, translated syntax, symmetric AI lists, and generic conclusions. 7) Update the same canonical Markdown file only. Do not create Canvas, Excalidraw, version copies, companion summaries, or team tasks. 8) Before saving, run evidence, decision, discipline, red-team, editorial, and source-fidelity passes. Respond in Chinese with the exact path, primary discipline, key decisions, unresolved assumptions, and acceptance gate status.',
     contextMode: 'currentNote',
   },
   {
@@ -1030,7 +1167,7 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
   {
     id: 'professional-design-review',
     labelKey: 'professionalDesignReview',
-    prompt: 'Review the current note as an Ars-note professional game-design studio. Let the specialist router choose one primary discipline and up to two review disciplines. Inspect the current note and the most relevant existing project documents before judging it. Report in Chinese: 1) selected disciplines and why, 2) confirmed facts vs design decisions vs assumptions vs open questions, 3) severity-ranked professional gaps, 4) concrete rule/data/content/Unity/UI/QA corrections, 5) a traceability matrix from design goal to implementation and acceptance, 6) discipline review gates marked Passed, Needs review, or Blocked, and 7) actionable team tasks with discipline, dependency, estimate, linked doc, acceptance, and QA/retest. This is a read-only review: do not create or modify files, Canvas, wireframes, or the team schedule unless the user explicitly asks in a follow-up.',
+    prompt: 'Review the current note as an Ars-note professional game-design studio. Let the specialist router choose one primary discipline and up to two review disciplines. Inspect the current canonical note and only the most relevant project evidence before judging it. Report in Chinese: 1) selected disciplines and why, 2) confirmed facts vs decisions vs assumptions vs open questions, 3) severity-ranked findings with evidence and player/production consequence, 4) contradictions, weak logic, content burden, scope creep, and schedule risks, 5) at least one simpler alternative for each major issue with a keep/change/cut/defer recommendation, 6) innovation assessment by player value, differentiation, core-loop fit, cost, cheapest prototype, and kill/continue evidence, 7) traceability and review gates marked Passed, Needs review, or Blocked, and 8) a concise scope ledger showing Added/Changed/Removed/Deferred/Rejected plus net scope and schedule impact. This is a read-only review: do not create or modify files, Canvas, wireframes, tasks, or the team schedule unless the user explicitly asks in a follow-up.',
     contextMode: 'currentNote',
   },
   {
@@ -1078,7 +1215,7 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
   {
     id: 'narrative-director',
     labelKey: 'narrativeDirector',
-    prompt: 'Take over the narrative production flow as a senior narrative director. IMPORTANT STEPS: 1) Use sync_team_task_docs first to pull latest linked task-document progress into the team schedule. 2) Use read_team_server_status(limit=24), then read_team_member_work for any intended owners, then read_production_health to identify server sync warnings, member workload, blocked, overdue, missing-owner, missing-document, due-soon, QA/Bug, playtest-feedback work, and narrative chain gaps. 3) Use draft_narrative_tasks(limit=32, include_qa=true, upsert=false) to convert those narrative gaps into concrete task drafts before you assign work. 4) Use list_files on 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, and 07_Unity_Tasks/. Read the most relevant files. 5) Use read_team_schedule if you need full active-task detail or local member workload before assigning work. 6) Build a production chain from world rules -> story beats -> quest beats -> dialogue needs -> performance/cutscene needs -> implementation task table -> QA/retest needs. 7) Create or update write_file("02_Worldbuilding/NarrativePipeline.md", content) with canon map, plot structure, quest mapping, dialogue plan, performance plan, QA/playtest impact, dependencies, risks, and open questions. 8) Create or update write_file("07_Unity_Tasks/NarrativeTaskTable.md", content) with a concrete task table: id, deliverable, owner/discipline, priority, dependency, doc link, implementation notes, acceptance criteria, QA/retest criteria, and status. 9) Use upsert_team_tasks with the reviewed draft_narrative_tasks output and any additional concrete tasks, or use draft_narrative_tasks(upsert=true) only when the user explicitly wants AI to add the drafted tasks directly. 10) Use generate_team_production_docs to refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/obsidian-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, and .ars-team/team-dashboard.md. 11) Read or open .ars-team/obsidian-command-center.md and .ars-team/narrative-director.md as the final control pages for the next production pass. 12) Verify both folders with list_files and use exact [[wiki-links]]. Respond in Chinese with the task-doc sync result, server sync status, member workload evidence, draft count, paths, imported/updated task count, production-health risks including QA/Bug/playtest items, generated production-doc paths, and next actions.',
+    prompt: 'Take over the narrative production flow as a senior narrative director. IMPORTANT STEPS: 1) Use sync_team_task_docs first to pull latest linked task-document progress into the team schedule. 2) Use read_team_server_status(limit=24), then read_team_member_work for any intended owners, then read_production_health to identify server sync warnings, member workload, blocked, overdue, missing-owner, missing-document, due-soon, QA/Bug, playtest-feedback work, and narrative chain gaps. 3) Use draft_narrative_tasks(limit=32, include_qa=true, upsert=false) to convert those narrative gaps into concrete task drafts before you assign work. 4) Use list_files on 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, and 07_Unity_Tasks/. Read the most relevant files. 5) Use read_team_schedule if you need full active-task detail or local member workload before assigning work. 6) Build a production chain from world rules -> story beats -> quest beats -> dialogue needs -> performance/cutscene needs -> implementation task table -> QA/retest needs. 7) Create or update write_file("02_Worldbuilding/NarrativePipeline.md", content) with canon map, plot structure, quest mapping, dialogue plan, performance plan, QA/playtest impact, dependencies, risks, and open questions. 8) Create or update write_file("07_Unity_Tasks/NarrativeTaskTable.md", content) with a concrete task table: id, deliverable, owner/discipline, priority, dependency, doc link, implementation notes, acceptance criteria, QA/retest criteria, and status. 9) Use upsert_team_tasks with the reviewed draft_narrative_tasks output and any additional concrete tasks, or use draft_narrative_tasks(upsert=true) only when the user explicitly wants AI to add the drafted tasks directly. 10) Use generate_team_production_docs to refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/team-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, and .ars-team/team-dashboard.md. 11) Read or open .ars-team/team-command-center.md and .ars-team/narrative-director.md as the final control pages for the next production pass. 12) Verify both folders with list_files and use exact [[wiki-links]]. Respond in Chinese with the task-doc sync result, server sync status, member workload evidence, draft count, paths, imported/updated task count, production-health risks including QA/Bug/playtest items, generated production-doc paths, and next actions.',
     contextMode: 'gameWorkspace',
   },
   {
@@ -1108,13 +1245,13 @@ export const QUICK_PROMPTS: QuickPrompt[] = [
   {
     id: 'generate-task-table',
     labelKey: 'generateTaskTable',
-    prompt: 'Create a narrative implementation task table. IMPORTANT STEPS: 1) Use sync_team_task_docs first to pull latest linked task-document progress into the team schedule. 2) Use read_team_server_status(limit=24), then read_team_member_work for intended owners, then read_production_health to avoid ignoring server sync warnings, member workload, blocked, overdue, missing-document, QA/Bug, playtest-feedback production work, or narrative chain gaps. 3) Use draft_narrative_tasks(limit=40, include_qa=true, upsert=false) to get structured task drafts from narrative gaps. 4) Inspect 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, and 07_Unity_Tasks/. 5) Use read_team_schedule if you need full active-task detail before adding tasks. 6) Use write_file("07_Unity_Tasks/NarrativeTaskTable.md", content). 7) The table must include id, category, deliverable, owner/discipline, priority, dependencies, linked docs, implementation notes, test/acceptance criteria, QA/retest criteria, and status. 8) Map story/quest/dialogue/performance needs and unresolved QA/playtest feedback to concrete Unity or narrative tasks. 9) Use upsert_team_tasks to add/update those concrete tasks into the team schedule. 10) Use generate_team_production_docs to refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/obsidian-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, and .ars-team/team-dashboard.md. 11) Verify with list_files("07_Unity_Tasks/") and read/open .ars-team/obsidian-command-center.md as the final team entry. 12) Use exact [[wiki-links]]. Respond in Chinese with the task-doc sync result, server sync status, member workload evidence, task table path, draft count, schedule import/update result, production-health risks, generated production-doc paths, and QA follow-up items.',
+    prompt: 'Create a narrative implementation task table. IMPORTANT STEPS: 1) Use sync_team_task_docs first to pull latest linked task-document progress into the team schedule. 2) Use read_team_server_status(limit=24), then read_team_member_work for intended owners, then read_production_health to avoid ignoring server sync warnings, member workload, blocked, overdue, missing-document, QA/Bug, playtest-feedback production work, or narrative chain gaps. 3) Use draft_narrative_tasks(limit=40, include_qa=true, upsert=false) to get structured task drafts from narrative gaps. 4) Inspect 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, and 07_Unity_Tasks/. 5) Use read_team_schedule if you need full active-task detail before adding tasks. 6) Use write_file("07_Unity_Tasks/NarrativeTaskTable.md", content). 7) The table must include id, category, deliverable, owner/discipline, priority, dependencies, linked docs, implementation notes, test/acceptance criteria, QA/retest criteria, and status. 8) Map story/quest/dialogue/performance needs and unresolved QA/playtest feedback to concrete Unity or narrative tasks. 9) Use upsert_team_tasks to add/update those concrete tasks into the team schedule. 10) Use generate_team_production_docs to refresh .ars-team/ai-handoff.md, .ars-team/ai-memory-index.md, .ars-team/link-health.md, .ars-team/team-command-center.md, .ars-team/narrative-director.md, .ars-team/dependency-map.md, .ars-team/handoffs/blocker-handoff-YYYYMMDD.md, .ars-team/reviews/review-queue-YYYYMMDD.md, .ars-team/workpacks/daily-workpack-YYYYMMDD.md, .ars-team/timesheets/timesheet-YYYYMMDD.md, .ars-team/roadmaps/milestone-roadmap-YYYYMMDD.md, .ars-team/decisions/decision-log-YYYYMMDD.md, .ars-team/changes/change-impact-YYYYMMDD.md, .ars-team/sprints/sprint-plan-YYYYMMDD.md, .ars-team/members/*.md, and .ars-team/team-dashboard.md. 11) Verify with list_files("07_Unity_Tasks/") and read/open .ars-team/team-command-center.md as the final team entry. 12) Use exact [[wiki-links]]. Respond in Chinese with the task-doc sync result, server sync status, member workload evidence, task table path, draft count, schedule import/update result, production-health risks, generated production-doc paths, and QA follow-up items.',
     contextMode: 'gameWorkspace',
   },
   {
     id: 'narrative-consistency-audit',
     labelKey: 'narrativeConsistencyAudit',
-    prompt: 'Audit the narrative system like a narrative director who must also keep production moving across the team. IMPORTANT STEPS: 1) Use sync_team_task_docs first, then read_team_server_status(limit=24), read_team_member_work(limit=32), and read_production_health(limit=40) so the audit includes server sync warnings, member capacity, blocked/overdue/missing-doc work, QA/Bug/playtest feedback, and narrative-chain gaps. 2) Use draft_narrative_tasks(limit=40, include_qa=true, upsert=false) to convert missing world/story/quest/dialogue/performance/task-table links into structured task drafts before proposing fixes. 3) Inspect 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, 07_Unity_Tasks/, and .ars-team/ with list_files/read_file. 4) Identify contradictions, missing world rules, weak character motivation, plot holes, unresolved quest dependencies, missing dialogue, missing performance/cutscene sheets, missing implementation tasks, QA/retest gaps, and Obsidian links that do not resolve. 5) Create or update write_file("02_Worldbuilding/NarrativeAudit.md", content) with severity, canon impact, affected docs, exact fix proposal, owner/discipline suggestion, dependency, acceptance criteria, QA/retest criteria, and linked task/document references. 6) Create or update write_file("07_Unity_Tasks/NarrativeAuditFixes.md", content) with the actionable fix queue. 7) If the user explicitly asked AI to take over or create tasks, use upsert_team_tasks with the reviewed narrative task drafts; otherwise leave the queue as recommendations. 8) Use generate_team_production_docs to refresh .ars-team/obsidian-command-center.md, .ars-team/narrative-director.md, .ars-team/ai-handoff.md, .ars-team/link-health.md, .ars-team/dependency-map.md, workpack, timesheet, sprint plan, review queue, blocker handoff, member pages, dashboard, and missing task docs. 9) Verify 02_Worldbuilding/, 07_Unity_Tasks/, and .ars-team/ with list_files and exact [[wiki-links]]. Respond in Chinese with sync evidence, server status, member workload evidence, audit severity summary, draft count, files written, whether schedule was changed, generated production docs, and risks.',
+    prompt: 'Audit the narrative system like a narrative director who must also keep production moving across the team. IMPORTANT STEPS: 1) Use sync_team_task_docs first, then read_team_server_status(limit=24), read_team_member_work(limit=32), and read_production_health(limit=40) so the audit includes server sync warnings, member capacity, blocked/overdue/missing-doc work, QA/Bug/playtest feedback, and narrative-chain gaps. 2) Use draft_narrative_tasks(limit=40, include_qa=true, upsert=false) to convert missing world/story/quest/dialogue/performance/task-table links into structured task drafts before proposing fixes. 3) Inspect 01_GDD/, 02_Worldbuilding/, 03_Characters/, 06_Quests/, 07_Unity_Tasks/, and .ars-team/ with list_files/read_file. 4) Identify contradictions, missing world rules, weak character motivation, plot holes, unresolved quest dependencies, missing dialogue, missing performance/cutscene sheets, missing implementation tasks, QA/retest gaps, and Ars-note wiki-links that do not resolve. 5) Create or update write_file("02_Worldbuilding/NarrativeAudit.md", content) with severity, canon impact, affected docs, exact fix proposal, owner/discipline suggestion, dependency, acceptance criteria, QA/retest criteria, and linked task/document references. 6) Create or update write_file("07_Unity_Tasks/NarrativeAuditFixes.md", content) with the actionable fix queue. 7) If the user explicitly asked AI to take over or create tasks, use upsert_team_tasks with the reviewed narrative task drafts; otherwise leave the queue as recommendations. 8) Use generate_team_production_docs to refresh .ars-team/team-command-center.md, .ars-team/narrative-director.md, .ars-team/ai-handoff.md, .ars-team/link-health.md, .ars-team/dependency-map.md, workpack, timesheet, sprint plan, review queue, blocker handoff, member pages, dashboard, and missing task docs. 9) Verify 02_Worldbuilding/, 07_Unity_Tasks/, and .ars-team/ with list_files and exact [[wiki-links]]. Respond in Chinese with sync evidence, server status, member workload evidence, audit severity summary, draft count, files written, whether schedule was changed, generated production docs, and risks.',
     contextMode: 'gameWorkspace',
   },
   {
@@ -1165,7 +1302,7 @@ QUICK_PROMPTS.push(
   {
     id: 'write-game-design-spec',
     labelKey: 'writeGameDesignSpec',
-    prompt: 'Write or update a production-ready game design spec. First inspect the current note plus relevant 01_GDD/, 02_Worldbuilding/, 03_Characters/, 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ docs. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files unless explicitly requested. Produce a Markdown spec with: source references inspected, one-sentence design intent, player fantasy, goals/non-goals, core loop, mechanic rules, progression/economy, balance knobs, data/config schema, UI/feedback/VFX/SFX, art/content pipeline, technical handoff, edge cases, QA/telemetry, acceptance criteria, risks, open questions, and next tasks. Save it as 01_GDD/GameDesignSpec.md unless a more specific existing design doc should be updated; verify the exact file name. Respond in Chinese with the path and the most important design decisions.',
+    prompt: 'Write or update one canonical production-ready GDD. First inspect the current note plus only relevant 01_GDD/, 02_Worldbuilding/, 03_Characters/, 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ evidence, then diagnose contradictions before editing. Reuse the canonical document in place; only use 01_GDD/GameDesignSpec.md when none exists. Never create v2/final/new/optimized/copy or companion versions, Canvas, Excalidraw, workspace summaries, or .visual.md files unless explicitly requested. Build one causal spine before drafting: target player and player promise -> immediate goal -> meaningful choice/action -> rule resolution and feedback -> reward/cost -> spend/transform -> progression/unlock -> changed next decision -> explicit re-entry. Combat, collection, construction, exploration, and dialogue are actions or subsystems, not complete core loops by themselves. Connect moment-to-moment, encounter/task, session, meta/progression, and long-term horizons; state what each consumes, outputs, and changes when the player returns. Organize sections in dependency order: thesis/non-goals, experience horizons, canonical loop, progression/economy, system topology, content/challenge, failure/recovery, UX/feedback, production/technology, validation, and decision ledger. Every major system must declare its loop role, inputs, player decisions, rules, outputs, dependencies, feedback, failure/recovery, tuning owner, and acceptance evidence. For each major decision compare a simpler option and explain the tradeoff before expanding scope. Reject rewards without sinks, progression that does not change later choices, dead ends without re-entry, and unrelated feature inventories. End with traceability, prototype/telemetry, Passed/Needs review/Blocked gates, Added/Changed/Removed/Deferred/Rejected, net scope, schedule impact, and owner-ready decisions. Respond in Chinese with the exact canonical path and key tradeoffs.',
     contextMode: 'gameWorkspace',
   },
   {
@@ -1189,7 +1326,7 @@ QUICK_PROMPTS.push(
 );
 
 const PROFESSIONAL_QUICK_PROMPT_OVERRIDES: Record<string, string> = {
-  'write-game-design-spec': 'Write or update a production-ready game design spec. First inspect the current note plus relevant 01_GDD/, 02_Worldbuilding/, 03_Characters/, 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ docs. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files unless explicitly requested. Produce a Markdown spec with: source references inspected, one-sentence design intent, player fantasy, goals/non-goals, core loop, mechanic rules, progression/economy, balance knobs, data/config schema, UI/feedback/VFX/SFX, art/content pipeline, technical handoff, edge cases, QA/telemetry, acceptance criteria, risks, open questions, and next tasks. Save it as 01_GDD/GameDesignSpec.md unless a more specific existing design doc should be updated; verify the exact file name. Respond in Chinese with the path and the most important design decisions.',
+  'write-game-design-spec': 'Write or update one canonical production-ready GDD. First inspect the current note plus only relevant 01_GDD/, 02_Worldbuilding/, 03_Characters/, 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ evidence, then diagnose contradictions before editing. Reuse the canonical document in place; only use 01_GDD/GameDesignSpec.md when none exists. Never create v2/final/new/optimized/copy or companion versions, Canvas, Excalidraw, workspace summaries, or .visual.md files unless explicitly requested. Build one causal spine before drafting: target player and player promise -> immediate goal -> meaningful choice/action -> rule resolution and feedback -> reward/cost -> spend/transform -> progression/unlock -> changed next decision -> explicit re-entry. Combat, collection, construction, exploration, and dialogue are actions or subsystems, not complete core loops by themselves. Connect moment-to-moment, encounter/task, session, meta/progression, and long-term horizons; state what each consumes, outputs, and changes when the player returns. Organize sections in dependency order: thesis/non-goals, experience horizons, canonical loop, progression/economy, system topology, content/challenge, failure/recovery, UX/feedback, production/technology, validation, and decision ledger. Every major system must declare its loop role, inputs, player decisions, rules, outputs, dependencies, feedback, failure/recovery, tuning owner, and acceptance evidence. For each major decision compare a simpler option and explain the tradeoff before expanding scope. Reject rewards without sinks, progression that does not change later choices, dead ends without re-entry, and unrelated feature inventories. End with traceability, prototype/telemetry, Passed/Needs review/Blocked gates, Added/Changed/Removed/Deferred/Rejected, net scope, schedule impact, and owner-ready decisions. Respond in Chinese with the exact canonical path and key tradeoffs.',
   'design-core-gameplay-loop': 'Design or repair the project core gameplay loop as a senior system designer, with economy and UX cross-review. IMPORTANT STEPS: 1) Inspect 01_GDD/ first, then read only the most relevant 04_Maps/, 05_Items/, 06_Quests/, and 07_Unity_Tasks/ documents; distinguish confirmed facts, existing decisions, assumptions, and open questions. 2) Reuse and update an equivalent existing core-loop document when one exists; otherwise use write_file("01_GDD/GameplayLoop.md", content). 3) Define the player promise, target emotion/play context, core verbs, meaningful decisions, and non-goals. 4) Model connected moment-to-moment, encounter/task, session, meta/progression, and long-term loops. For every step specify player intent, action/input, rule/state change, feedback, reward/cost, decision, failure/recovery, and re-entry condition. 5) Map resource sources, transformations, storage/caps, sinks, gates, unlocks, reset points, interruption/resume, anti-exploit rules, and early/mid/late variants. 6) Add UX/VFX/SFX feedback, accessibility, content-production burden, system dependencies, a traceability matrix, smallest playable prototype, observation plan, telemetry events, acceptance criteria, and Passed/Needs review/Blocked gates. Do not invent numeric targets without project evidence. 7) Do not create Canvas, Excalidraw, workspace summaries, companion .visual.md files, or team schedule tasks. 8) Verify the exact Markdown path with list_files("01_GDD/") and respond in Chinese with the path, loop thesis, unresolved assumptions, and prototype test. A feature list or Action -> Reward -> Action slogan is not sufficient.',
   'design-system-breakdown': 'Turn the current idea, note, or referenced feature into a system-design breakdown for implementation. First inspect the current note and relevant GDD/Unity task files. Do not create Canvas, Excalidraw, workspace summaries, or companion .visual.md files unless explicitly requested. Write Markdown covering: feature purpose, player-facing loop, state machine, triggers, rules, data fields, formulas/default values, progression/economy impact, UI states, feedback, dependencies, failure cases, QA cases, telemetry, Unity implementation tasks, and acceptance criteria. Save it as 01_GDD/SystemDesign.md or update the most appropriate existing system design doc, then verify the exact file name. Respond in Chinese with the path and task handoff summary.',
   'create-wireframe': 'Create a professional game UI wireframe prototype. First inspect existing wireframes with list_files("wireframes/") and read any relevant UI/GDD files. Use create_wireframe to create an .excalidraw file with 1-3 focused screens. Use a realistic frame size (desktop 1366x768 or mobile 390x844), clear navigation, main content hierarchy, primary/secondary actions, empty/error/selected states, and consistent spacing (24px page padding, 16px panel padding, 8-12px gaps). Do not cram requirements text into the prototype; every label must fit inside its box, so keep labels short and commercial. After creation, summarize the screen purpose, interaction flow, and exact file path in Chinese.',
@@ -1203,5 +1340,4 @@ const PROFESSIONAL_QUICK_PROMPT_OVERRIDES: Record<string, string> = {
 for (const prompt of QUICK_PROMPTS) {
   const override = PROFESSIONAL_QUICK_PROMPT_OVERRIDES[prompt.id];
   if (override) prompt.prompt = override;
-  prompt.prompt = enforceArsNoteProductIdentity(prompt.prompt);
 }

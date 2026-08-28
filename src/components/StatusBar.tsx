@@ -30,9 +30,20 @@ const StatusBar: React.FC<StatusBarProps> = ({ filePath, fileName, isDirty, savi
         : '';
 
   const hasContent = typeof content === 'string';
-  const lines = hasContent ? content.split('\n').length : 0;
-  const chars = hasContent ? content.length : 0;
-  const words = hasContent ? content.trim().split(/\s+/).filter(Boolean).length : 0;
+  const { lines, chars, words } = React.useMemo(() => {
+    if (!hasContent) return { lines: 0, chars: 0, words: 0 };
+    let lineCount = 1;
+    let wordCount = 0;
+    let insideWord = false;
+    for (let index = 0; index < content.length; index += 1) {
+      const char = content[index];
+      if (char === '\n') lineCount += 1;
+      const whitespace = /\s/.test(char);
+      if (!whitespace && !insideWord) wordCount += 1;
+      insideWord = !whitespace;
+    }
+    return { lines: lineCount, chars: content.length, words: wordCount };
+  }, [content, hasContent]);
 
   return (
     <div className="statusbar">
@@ -72,4 +83,4 @@ const StatusBar: React.FC<StatusBarProps> = ({ filePath, fileName, isDirty, savi
   );
 };
 
-export default StatusBar;
+export default React.memo(StatusBar);

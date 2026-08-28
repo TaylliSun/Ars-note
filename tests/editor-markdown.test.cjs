@@ -12,7 +12,7 @@ const {
 const {
   normalizeCompressedMarkdownTablesInText,
 } = require('../dist-test/src/utils/markdownTableRepair.js');
-const { renderMarkdown } = require('../dist-test/src/utils/markdownRenderer.js');
+const { buildExportDocument, renderMarkdown } = require('../dist-test/src/utils/markdownRenderer.js');
 
 test('Compressed one-line Markdown tables are repaired into stable source lines', () => {
   const source = '| 等级 | 莲花 | |--|--| | Lv.1 | 2 朵 | | Lv.5 | 5 朵 |';
@@ -64,4 +64,24 @@ test('Preview renderer groups callouts and renders repaired tables instead of ra
   assert.match(html, /class="md-callout/);
   assert.match(html, /<table(?:\s|>)/);
   assert.doesNotMatch(html, /\|--\|/);
+});
+
+test('Preview and exported Markdown reject executable link schemes', () => {
+  const html = renderMarkdown([
+    '[safe](https://example.com/design)',
+    '[relative](docs/guide.md)',
+    '[unsafe](javascript:alert(1))',
+    '[data](data:text/html,boom)',
+    '[credentials](https://user:secret@example.com/private)',
+  ].join(' '));
+
+  assert.match(html, /href="https:\/\/example\.com\/design"/);
+  assert.match(html, /href="docs\/guide\.md"/);
+  assert.doesNotMatch(html, /href="(?:javascript|data):/i);
+  assert.doesNotMatch(html, /user:secret/);
+  assert.equal((html.match(/md-link-invalid/g) || []).length, 3);
+
+  const exported = buildExportDocument(html, '<Unsafe title>');
+  assert.match(exported, /<title>&lt;Unsafe title&gt;<\/title>/);
+  assert.match(exported, /table\{border-collapse:collapse/);
 });

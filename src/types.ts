@@ -1374,6 +1374,34 @@ export interface AIContextUsage {
   compressionNotes: string[];
 }
 
+export type AIDesignWritingKind = 'gdd' | 'system' | 'economy' | 'level' | 'combat' | 'narrative' | 'ux' | 'technical' | 'art' | 'general';
+export type AIDesignReadiness = 'draft' | 'review-ready' | 'implementation-ready';
+
+export interface AIDesignQualityCheck {
+  id: string;
+  label: string;
+  passed: boolean;
+  critical?: boolean;
+  discipline?: boolean;
+}
+
+export interface AIDesignQualityReport {
+  path: string;
+  kind: AIDesignWritingKind;
+  readiness: AIDesignReadiness;
+  passed: boolean;
+  maturityScore: number;
+  naturalnessScore: number;
+  characterCount: number;
+  analyzedCharacterCount: number;
+  analysisScope: 'full' | 'sampled';
+  checks: AIDesignQualityCheck[];
+  issues: AIDesignQualityCheck[];
+  strengths: AIDesignQualityCheck[];
+  naturalnessIssues: string[];
+  analyzedAt: string;
+}
+
 export interface AIResponse {
   ok: boolean;
   content?: string;
@@ -1535,7 +1563,7 @@ export interface ArsNoteAPI {
   openVault: (dir: string) => Promise<VaultOpenResult | null>;
   getRecentVaults: () => Promise<string[]>;
   addRecentVault: (dir: string) => Promise<void>;
-  readFileTree: (vaultPath: string) => Promise<FileNode[]>;
+  readFileTree: (vaultPath: string, force?: boolean) => Promise<FileNode[]>;
   readFile: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<void>;
   saveImageToVault: (vp: string, relPath: string, data: number[]) => Promise<string>;
@@ -1593,6 +1621,7 @@ export interface ArsNoteAPI {
   setAIRuntimeConfig: (vaultPath: string, config: { provider: string; baseUrl: string; model: string; apiKey: string }) => Promise<void>;
   clearAIRuntimeConfig: (vaultPath: string) => Promise<void>;
   getAIRuntimeStatus: (vaultPath: string) => Promise<AIRuntimeStatus>;
+  aiAuditDesignDocument: (filePath: string, content: string, options?: { totalCharacterCount?: number; sampled?: boolean }) => Promise<AIDesignQualityReport>;
   testAIConnection: (vaultPath: string) => Promise<AIConnectionTestResult>;
   aiSafetySelfTest: (vaultPath: string) => Promise<AISafetySelfTestResult>;
   aiListOperationAudit: (vaultPath: string, limit?: number) => Promise<AIOperationAuditEvent[]>;
@@ -1604,7 +1633,7 @@ export interface ArsNoteAPI {
   syncTeamTaskDocs: (vaultPath: string, fallbackMember?: string) => Promise<TeamTaskDocsSyncResult>;
   generateTeamProductionDocs: (vaultPath: string, options?: {
     includeDashboard?: boolean;
-    includeObsidianCommandCenter?: boolean;
+    includeTeamCommandCenter?: boolean;
     includeProductionHealth?: boolean;
     includeDependencyMap?: boolean;
     includeHandoff?: boolean;
@@ -1640,7 +1669,11 @@ export interface ArsNoteAPI {
   aiSyncStatus: (vaultPath: string) => Promise<{ ok: boolean; hasData: boolean; syncedAt: string; fileCount: number; files: string[] }>;
   aiStartAutoSync: (vaultPath: string) => Promise<void>;
   aiStopAutoSync: () => Promise<void>;
-  sendAIChat: (vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: AIControlMode; requestId?: string }) => Promise<AIResponse>;
+  sendAIChat: (
+    vaultPath: string,
+    messages: Array<{ role: string; content: string }>,
+    options?: { controlMode?: AIControlMode; requestId?: string; currentFilePath?: string },
+  ) => Promise<AIResponse>;
   cancelAIChat: (requestId: string) => Promise<{ ok: boolean }>;
   onAIToolProgress: (callback: (data: { name: string; args: Record<string, string>; status: string }) => void) => () => void;
   aiInitMemory: (vp: string) => Promise<void>;

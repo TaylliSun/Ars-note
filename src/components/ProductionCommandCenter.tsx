@@ -1411,7 +1411,7 @@ const ProductionCommandCenter: React.FC<ProductionCommandCenterProps> = ({
             className="production-command-export"
             onClick={handleExportRadarReport}
             disabled={!result || loading || exportingReport}
-            title="把本次扫描结果保存为 Obsidian Markdown 报告"
+            title="把本次扫描结果保存为 Ars-note Markdown 报告"
           >
             {exportingReport ? '导出中' : '导出巡检'}
           </button>

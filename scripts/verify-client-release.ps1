@@ -32,6 +32,21 @@ function Assert-File {
   }
 }
 
+function Get-Sha256Hex {
+  param([string]$Path)
+  $Stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $Hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+      $Hasher.Dispose()
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
 if (-not $SkipChecks) {
   Invoke-CheckedNpm @("test")
   $CommandsRun.Add("npm test")
@@ -81,13 +96,64 @@ if (-not $ExcalidrawVendor) {
 
 $AssetsDir = Join-Path $Root "dist\assets"
 $AssetNames = @(Get-ChildItem -LiteralPath $AssetsDir -File | ForEach-Object { $_.Name })
-$RequiredLazyChunks = @("RightPanel", "GraphView", "CanvasEditor", "ExcalidrawEditor", "AIFivePillarPanel", "TeamSchedulePanel")
+$RequiredLazyChunks = @("RightPanel", "RightPanelGameView", "RightPanelAIView", "RightPanelBackupView", "RightPanelSettingsView", "GraphView", "CanvasEditor", "ExcalidrawEditor", "AIFivePillarPanel", "TeamSchedulePanel", "BalanceLab", "TemplateBrowserPanel", "ProductionCommandCenter", "designQualityWorker")
 $MissingLazyChunks = @($RequiredLazyChunks | Where-Object {
   $ChunkName = $_
   -not ($AssetNames | Where-Object { $_ -like "$ChunkName-*.js" })
 })
 if ($MissingLazyChunks.Count -gt 0) {
   throw "Missing expected lazy chunks: $($MissingLazyChunks -join ', ')"
+}
+
+$RequiredLazyStyles = @("RightPanelBackupView")
+$MissingLazyStyles = @($RequiredLazyStyles | Where-Object {
+  $StyleName = $_
+  -not ($AssetNames | Where-Object { $_ -like "$StyleName-*.css" })
+})
+if ($MissingLazyStyles.Count -gt 0) {
+  throw "Missing expected lazy styles: $($MissingLazyStyles -join ', ')"
+}
+
+$BundleBudgets = [ordered]@{
+  RightPanel = 140KB
+  RightPanelGameView = 48KB
+  RightPanelAIView = 48KB
+  RightPanelBackupView = 48KB
+  RightPanelSettingsView = 128KB
+}
+$BundleBudgetReport = [ordered]@{}
+foreach ($ChunkName in $BundleBudgets.Keys) {
+  $Chunk = Get-ChildItem -LiteralPath $AssetsDir -Filter "$ChunkName-*.js" -File |
+    Sort-Object Length -Descending |
+    Select-Object -First 1
+  if (-not $Chunk) {
+    throw "Missing budgeted lazy chunk: $ChunkName"
+  }
+  $BudgetBytes = [long]$BundleBudgets[$ChunkName]
+  if ($Chunk.Length -gt $BudgetBytes) {
+    throw "$ChunkName bundle is $($Chunk.Length) bytes, above the $BudgetBytes byte release budget"
+  }
+  $BundleBudgetReport[$ChunkName] = [ordered]@{
+    file = $Chunk.Name
+    sizeBytes = $Chunk.Length
+    maxBytes = $BudgetBytes
+  }
+}
+
+$CssAsset = Get-ChildItem -LiteralPath $AssetsDir -Filter "*.css" -File |
+  Sort-Object Length -Descending |
+  Select-Object -First 1
+$CssBudgetBytes = 530KB
+if (-not $CssAsset) {
+  throw "Missing renderer CSS asset"
+}
+if ($CssAsset.Length -gt $CssBudgetBytes) {
+  throw "Renderer CSS is $($CssAsset.Length) bytes, above the $CssBudgetBytes byte release budget"
+}
+$BundleBudgetReport["rendererCss"] = [ordered]@{
+  file = $CssAsset.Name
+  sizeBytes = $CssAsset.Length
+  maxBytes = $CssBudgetBytes
 }
 
 if (-not $InstallerPath) {
@@ -110,12 +176,11 @@ if ($InstallerPath) {
   if (-not $ProductVersion.StartsWith($Version, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Installer ProductVersion '$ProductVersion' does not match $Version"
   }
-  $Hash = Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256
   $InstallerInfo = [ordered]@{
     path = $InstallerPath
     sizeBytes = $InstallerFile.Length
     productVersion = $ProductVersion
-    sha256 = $Hash.Hash.ToLowerInvariant()
+    sha256 = Get-Sha256Hex -Path $InstallerPath
   }
 }
 
@@ -144,6 +209,8 @@ $Manifest = [ordered]@{
     excalidrawBootstrap = $ExcalidrawBootstrap
     excalidrawVendor = $ExcalidrawVendor.FullName
     lazyChunks = $RequiredLazyChunks
+    lazyStyles = $RequiredLazyStyles
+    bundleBudgets = $BundleBudgetReport
     installer = $InstallerInfo
   }
 }

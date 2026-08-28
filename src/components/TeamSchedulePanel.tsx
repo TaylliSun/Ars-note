@@ -14,7 +14,8 @@ import { createDebouncedLatestWriter } from '../utils/debouncedLatestWriter';
 type TeamTaskStatus = 'todo' | 'doing' | 'review' | 'blocked' | 'done';
 type TeamTaskPriority = 'high' | 'medium' | 'low';
 type TeamReviewResult = 'approved' | 'changes' | 'note';
-type TeamScheduleViewMode = 'focus' | 'table' | 'board' | 'logs';
+type TeamScheduleViewMode = 'focus' | 'triage' | 'table' | 'board' | 'logs';
+type TeamTriageKind = 'review' | 'blocked' | 'overdue' | 'unassigned' | 'incomplete';
 type TeamScheduleSortMode = 'dueAsc' | 'priorityDesc' | 'updatedDesc' | 'ownerAsc' | 'spentDesc';
 type TeamFocusScope = 'mine' | 'team';
 type TaskDocStatus = 'linked' | 'missing' | 'none';
@@ -130,8 +131,8 @@ type TeamProductionDocOptions = NonNullable<Parameters<typeof api.generateTeamPr
 const SCHEDULE_DIR = '.ars-team';
 const SCHEDULE_FILE = 'schedule.json';
 const SCHEDULE_RELATIVE_PATH = `${SCHEDULE_DIR}/${SCHEDULE_FILE}`;
-const OBSIDIAN_COMMAND_CENTER_PATH = `${SCHEDULE_DIR}/obsidian-command-center.md`;
-const BOOTSTRAP_COMMAND_TASK_TITLE = '初始化 Obsidian 团队制作控制台';
+const TEAM_COMMAND_CENTER_PATH = `${SCHEDULE_DIR}/team-command-center.md`;
+const BOOTSTRAP_COMMAND_TASK_TITLE = '初始化 Ars-note 团队制作控制台';
 const STATUS_ORDER: TeamTaskStatus[] = ['todo', 'doing', 'review', 'blocked', 'done'];
 const STATUS_LABELS: Record<TeamTaskStatus, string> = {
   todo: '待开始',
@@ -155,7 +156,7 @@ const REVIEW_RESULT_LABELS: Record<TeamReviewResult, string> = {
 function productionDocSubset(enabled: Partial<TeamProductionDocOptions>): TeamProductionDocOptions {
   return {
     includeDashboard: false,
-    includeObsidianCommandCenter: false,
+    includeTeamCommandCenter: false,
     includeProductionHealth: false,
     includeDependencyMap: false,
     includeHandoff: false,
@@ -181,7 +182,7 @@ function productionDocSubset(enabled: Partial<TeamProductionDocOptions>): TeamPr
 function allProductionDocs(): TeamProductionDocOptions {
   return {
     includeDashboard: true,
-    includeObsidianCommandCenter: true,
+    includeTeamCommandCenter: true,
     includeProductionHealth: true,
     includeDependencyMap: true,
     includeHandoff: true,
@@ -213,6 +214,13 @@ function nowIso(): string {
 
 function todayString(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function dateOffset(baseDate: string, days: number): string {
+  const source = /^\d{4}-\d{2}-\d{2}$/.test(baseDate) ? baseDate : todayString();
+  const date = new Date(`${source}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function formatLocalDateTime(value: string): string {
@@ -331,7 +339,11 @@ function loadRiskScore(load: {
 
 function normalizeTask(raw: any): TeamScheduleTask | null {
   if (!raw || typeof raw !== 'object') return null;
-  const title = String(raw.title || raw.name || '').trim();
+  const rawTitle = String(raw.title || raw.name || '').trim();
+  const linkedDoc = normalizePath(String(raw.linkedDoc || raw.doc || raw.path || ''));
+  const title = linkedDoc.toLowerCase() === '07_unity_tasks/teamproductionbootstrap.md'
+    ? BOOTSTRAP_COMMAND_TASK_TITLE
+    : rawTitle;
   if (!title) return null;
   const logs = Array.isArray(raw.logs) ? raw.logs : [];
   const reviewLogs = Array.isArray(raw.reviewLogs) ? raw.reviewLogs : [];
@@ -344,7 +356,7 @@ function normalizeTask(raw: any): TeamScheduleTask | null {
     startDate: String(raw.startDate || raw.start || '').slice(0, 10),
     dueDate: String(raw.dueDate || raw.due || raw.deadline || '').slice(0, 10),
     estimateMinutes: toMinutes(raw.estimateMinutes || raw.estimate),
-    linkedDoc: normalizePath(String(raw.linkedDoc || raw.doc || raw.path || '')),
+    linkedDoc,
     deliverable: String(raw.deliverable || raw.summary || ''),
     dependency: String(raw.dependency || raw.dependencies || ''),
     blocker: String(raw.blocker || raw.blockedReason || ''),
@@ -600,16 +612,30 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [currentMember, setCurrentMember] = useState(() => localStorage.getItem('ars-note.team.currentMember') || '');
-  const [viewMode, setViewMode] = useState<TeamScheduleViewMode>('focus');
+  const [viewMode, setViewMode] = useState<TeamScheduleViewMode>(() => {
+    const saved = localStorage.getItem('ars-note.team.viewMode');
+    return saved === 'focus' || saved === 'triage' || saved === 'table' || saved === 'board' || saved === 'logs'
+      ? saved
+      : 'focus';
+  });
   const [focusScope, setFocusScope] = useState<TeamFocusScope>(() => {
     const saved = localStorage.getItem('ars-note.team.focusScope');
     if (saved === 'mine' || saved === 'team') return saved;
     return localStorage.getItem('ars-note.team.currentMember') ? 'mine' : 'team';
   });
-  const [sortMode, setSortMode] = useState<TeamScheduleSortMode>('dueAsc');
-  const [statusFilter, setStatusFilter] = useState<TeamTaskStatus | 'all'>('all');
-  const [memberFilter, setMemberFilter] = useState('all');
+  const [sortMode, setSortMode] = useState<TeamScheduleSortMode>(() => {
+    const saved = localStorage.getItem('ars-note.team.sortMode');
+    return saved === 'dueAsc' || saved === 'priorityDesc' || saved === 'updatedDesc' || saved === 'ownerAsc' || saved === 'spentDesc'
+      ? saved
+      : 'dueAsc';
+  });
+  const [statusFilter, setStatusFilter] = useState<TeamTaskStatus | 'all'>(() => {
+    const saved = localStorage.getItem('ars-note.team.statusFilter');
+    return saved === 'todo' || saved === 'doing' || saved === 'review' || saved === 'blocked' || saved === 'done' ? saved : 'all';
+  });
+  const [memberFilter, setMemberFilter] = useState(() => localStorage.getItem('ars-note.team.memberFilter') || 'all');
   const [query, setQuery] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newOwner, setNewOwner] = useState('');
   const [newDoc, setNewDoc] = useState('');
@@ -648,7 +674,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const documentPaths = useMemo(() => collectDocumentPaths(fileTree, vaultPath), [fileTree, vaultPath]);
   const documentPathSet = useMemo(() => createDocumentPathSet(documentPaths), [documentPaths]);
   const commandCenterReady = useMemo(() => (
-    documentPathSet.has(normalizePath(OBSIDIAN_COMMAND_CENTER_PATH).toLowerCase())
+    documentPathSet.has(normalizePath(TEAM_COMMAND_CENTER_PATH).toLowerCase())
   ), [documentPathSet]);
 
   const schedulePath = useCallback(async () => {
@@ -744,6 +770,16 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   }, [focusScope]);
 
   useEffect(() => {
+    localStorage.setItem('ars-note.team.viewMode', viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem('ars-note.team.sortMode', sortMode);
+    localStorage.setItem('ars-note.team.statusFilter', statusFilter);
+    localStorage.setItem('ars-note.team.memberFilter', memberFilter);
+  }, [memberFilter, sortMode, statusFilter]);
+
+  useEffect(() => {
     if (focusScope !== 'mine') return;
     const rawMember = currentMember.trim();
     if (!rawMember) {
@@ -759,6 +795,21 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
     if (activeSession) localStorage.setItem('ars-note.team.activeSession', JSON.stringify(activeSession));
     else localStorage.removeItem('ars-note.team.activeSession');
   }, [activeSession]);
+
+  useEffect(() => {
+    setSelectedTaskId(null);
+  }, [vaultPath]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setSelectedTaskId(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedTaskId]);
 
   const commitData = useCallback((updater: (previous: TeamScheduleData) => TeamScheduleData) => {
     const next = updater(dataRef.current);
@@ -1105,6 +1156,21 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const activeTasks = useMemo(() => (
     data.tasks.filter((task) => task.status !== 'done' && !(commandCenterReady && isBootstrapCommandTask(task)))
   ), [commandCenterReady, data.tasks]);
+  const selectedTask = useMemo(() => (
+    selectedTaskId ? data.tasks.find((task) => task.id === selectedTaskId) || null : null
+  ), [data.tasks, selectedTaskId]);
+
+  const triageQueues = useMemo(() => {
+    const review = sortTasks(activeTasks.filter((task) => task.status === 'review'), 'dueAsc');
+    const blocked = sortTasks(activeTasks.filter((task) => task.status === 'blocked' || task.blocker.trim()), 'priorityDesc');
+    const overdue = sortTasks(activeTasks.filter(isOverdue), 'dueAsc');
+    const unassigned = sortTasks(activeTasks.filter((task) => isUnassignedMember(task.owner)), 'priorityDesc');
+    const incomplete = sortTasks(activeTasks.filter((task) => (
+      taskDocStatus(task, documentPathSet) !== 'linked' || !task.acceptance.trim()
+    )), 'priorityDesc');
+    const unique = new Set([...review, ...blocked, ...overdue, ...unassigned, ...incomplete].map((task) => task.id));
+    return { review, blocked, overdue, unassigned, incomplete, total: unique.size };
+  }, [activeTasks, documentPathSet]);
 
   const myOpenTasks = useMemo(() => {
     const member = currentMember.trim();
@@ -1146,6 +1212,16 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
   const currentMemberLoad = currentMember
     ? memberLoads.find((item) => cleanMemberName(item.member) === cleanMemberName(currentMember))
     : null;
+  const leastLoadedMember = useMemo(() => memberLoads
+    .filter((item) => !isUnassignedMember(item.member))
+    .slice()
+    .sort((left, right) => (
+      left.blocked - right.blocked ||
+      left.overdue - right.overdue ||
+      left.remaining - right.remaining ||
+      left.tasks.length - right.tasks.length ||
+      left.member.localeCompare(right.member, 'zh-CN')
+    ))[0]?.member || '', [memberLoads]);
   const serverAdminUrl = serverAdminUrlFromEndpoint(
     serverStatus?.endpoint || memberWork?.endpoint || liveSyncHealth?.local?.serverUrl || liveSyncHealth?.serverUrl || '',
   );
@@ -1220,6 +1296,41 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
       ...previous,
       tasks: previous.tasks.map((task) => task.id === taskId ? { ...task, ...patch, updatedAt: nowIso() } : task),
     }));
+  };
+
+  const openTaskDetails = (task: TeamScheduleTask) => {
+    setSelectedTaskId(task.id);
+  };
+
+  const assignToLeastLoadedMember = (task: TeamScheduleTask) => {
+    const candidates = memberLoads
+      .filter((item) => !isUnassignedMember(item.member) && cleanMemberName(item.member) !== cleanMemberName(task.owner))
+      .slice()
+      .sort((left, right) => (
+        left.blocked - right.blocked ||
+        left.overdue - right.overdue ||
+        left.remaining - right.remaining ||
+        left.tasks.length - right.tasks.length ||
+        left.member.localeCompare(right.member, 'zh-CN')
+      ));
+    const member = candidates[0]?.member || leastLoadedMember;
+    if (!member) {
+      setExportMsg('还没有可分配成员，请先在顶部填写成员名字。');
+      return;
+    }
+    updateTask(task.id, { owner: member });
+    setExportMsg(`已把“${task.title}”分配给 ${member}。`);
+  };
+
+  const clearTaskBlocker = (task: TeamScheduleTask) => {
+    updateTask(task.id, { blocker: '', status: task.status === 'blocked' ? 'doing' : task.status });
+    setExportMsg(`已解除“${task.title}”的阻塞，任务恢复推进。`);
+  };
+
+  const deferTask = (task: TeamScheduleTask) => {
+    const dueDate = dateOffset(task.dueDate || todayString(), 3);
+    updateTask(task.id, { dueDate });
+    setExportMsg(`已将“${task.title}”顺延到 ${dueDate}。`);
   };
 
   const addTask = () => {
@@ -1676,6 +1787,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
         </div>
         <div className="team-focus-task-actions">
           <div className="team-focus-primary-actions">
+            <button type="button" onClick={() => openTaskDetails(task)}>任务详情</button>
             <select value={task.status} onChange={(event) => updateTask(task.id, { status: event.target.value as TeamTaskStatus })} aria-label="任务状态">
               {STATUS_ORDER.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}
             </select>
@@ -1701,6 +1813,57 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
       </article>
     );
   };
+
+  const renderTriageCard = (task: TeamScheduleTask, kind: TeamTriageKind) => {
+    const docStatus = taskDocStatus(task, documentPathSet);
+    const reason = kind === 'review'
+      ? '交付已提交，等待负责人确认结果。'
+      : kind === 'blocked'
+        ? task.blocker || '任务状态为阻塞，但还没有填写具体原因。'
+        : kind === 'overdue'
+          ? `原截止日期 ${task.dueDate || '未填写'}，需要延期、拆分或调整优先级。`
+          : kind === 'unassigned'
+            ? `当前没有负责人${leastLoadedMember ? `，建议分配给 ${leastLoadedMember}` : ''}。`
+            : [docStatus !== 'linked' ? (docStatus === 'missing' ? '关联文档不存在' : '未关联任务文档') : '', !task.acceptance.trim() ? '缺少验收标准' : '']
+              .filter(Boolean)
+              .join(' · ');
+    return (
+      <article key={`${kind}-${task.id}`} className={`team-triage-card kind-${kind} priority-${task.priority}`}>
+        <div className="team-triage-card-top">
+          <span className={`team-priority-pill priority-${task.priority}`}>{PRIORITY_LABELS[task.priority]}</span>
+          <strong title={task.title}>{task.title}</strong>
+          <span className={`team-triage-status status-${task.status}`}>{STATUS_LABELS[task.status]}</span>
+        </div>
+        <p>{reason}</p>
+        <div className="team-triage-meta">
+          <span>{task.owner || '未分配'}</span>
+          <span className={isOverdue(task) ? 'danger' : ''}>{taskDueLabel(task)}</span>
+          <span>{task.linkedDoc || '无任务文档'}</span>
+        </div>
+        <div className="team-triage-actions">
+          {kind === 'review' && <>
+            <button type="button" className="review-approve" onClick={() => addReviewLog(task, 'approved')}>通过</button>
+            <button type="button" className="review-changes" onClick={() => addReviewLog(task, 'changes')}>退回</button>
+          </>}
+          {kind === 'blocked' && <button type="button" onClick={() => clearTaskBlocker(task)}>解除阻塞</button>}
+          {kind === 'overdue' && <button type="button" onClick={() => deferTask(task)}>顺延 3 天</button>}
+          {kind === 'unassigned' && <button type="button" onClick={() => assignToLeastLoadedMember(task)}>智能分配</button>}
+          <button type="button" onClick={() => void createOrOpenTaskDoc(task)} disabled={busy === `doc-${task.id}`}>
+            <FileIcon size={12} /> {docStatus === 'linked' ? '打开文档' : '生成文档'}
+          </button>
+          <button type="button" onClick={() => openTaskDetails(task)}>任务详情</button>
+        </div>
+      </article>
+    );
+  };
+
+  const triageSections: Array<{ kind: TeamTriageKind; title: string; hint: string; tasks: TeamScheduleTask[] }> = [
+    { kind: 'review', title: '待验收', hint: '确认交付，直接通过或退回修改', tasks: triageQueues.review },
+    { kind: 'blocked', title: '阻塞任务', hint: '先处理依赖和阻塞原因', tasks: triageQueues.blocked },
+    { kind: 'overdue', title: '逾期任务', hint: '顺延、拆分或重新排优先级', tasks: triageQueues.overdue },
+    { kind: 'unassigned', title: '未分配', hint: '按当前负载推荐负责人', tasks: triageQueues.unassigned },
+    { kind: 'incomplete', title: '闭环不完整', hint: '补齐任务文档与验收标准', tasks: triageQueues.incomplete },
+  ];
 
   return (
     <section className="team-schedule-panel">
@@ -1811,6 +1974,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
             {nextTask ? (
               <>
                 <button type="button" onClick={() => void createOrOpenTaskDoc(nextTask)}>{taskDocStatus(nextTask, documentPathSet) === 'linked' ? '打开任务文档' : '生成任务文档'}</button>
+                <button type="button" onClick={() => openTaskDetails(nextTask)}>查看详情</button>
                 <button type="button" onClick={() => updateTask(nextTask.id, { status: nextTask.status === 'todo' ? 'doing' : nextTask.status })} disabled={nextTask.status !== 'todo'}>{nextTask.status === 'todo' ? '开始推进' : STATUS_LABELS[nextTask.status]}</button>
                 <button type="button" onClick={() => startTimer(nextTask)} disabled={!!activeSession}>开始工作</button>
               </>
@@ -1947,7 +2111,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
         <section className="team-production-actions">
           <div className="team-production-action-group">
             <strong>制作文档</strong>
-            <button type="button" onClick={() => void refreshProductionDocsAndOpen('command', `${SCHEDULE_DIR}/obsidian-command-center.md`, allProductionDocs())}>打开 Ars-note 制作台</button>
+            <button type="button" onClick={() => void refreshProductionDocsAndOpen('command', TEAM_COMMAND_CENTER_PATH, allProductionDocs())}>打开 Ars-note 制作台</button>
             <button type="button" onClick={() => void refreshProductionDocsAndOpen('dashboard', `${SCHEDULE_DIR}/team-dashboard.md`, allProductionDocs())}>刷新团队看板</button>
             <button type="button" onClick={() => void refreshProductionDocsAndOpen('health', `${SCHEDULE_DIR}/production-health.md`, allProductionDocs())}>制作健康检查</button>
             <button type="button" onClick={() => void refreshProductionDocsAndOpen('narrative', `${SCHEDULE_DIR}/narrative-director.md`, allProductionDocs())}>叙事导演页</button>
@@ -1970,7 +2134,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
             <button type="button" onClick={() => void generateMissingTaskDocs()} disabled={!!busy}>修复任务文档</button>
             <button type="button" onClick={() => void importCurrentDocumentTasks()} disabled={!onImportCurrentDocumentTasks || !!busy}>导入当前文档任务</button>
           </div>
-          <button type="button" onClick={() => void refreshProductionDocsAndOpen('command', `${SCHEDULE_DIR}/obsidian-command-center.md`, allProductionDocs())}>打开 Ars-note 制作台</button>
+          <button type="button" onClick={() => void refreshProductionDocsAndOpen('command', TEAM_COMMAND_CENTER_PATH, allProductionDocs())}>打开 Ars-note 制作台</button>
           <button type="button" onClick={() => void refreshProductionDocsAndOpen('dashboard', `${SCHEDULE_DIR}/team-dashboard.md`, allProductionDocs())}>刷新团队看板</button>
           <button type="button" onClick={() => void refreshProductionDocsAndOpen('health', `${SCHEDULE_DIR}/production-health.md`, allProductionDocs())}>制作健康检查</button>
           <button type="button" onClick={() => void refreshProductionDocsAndOpen('narrative', `${SCHEDULE_DIR}/narrative-director.md`, allProductionDocs())}>叙事导演页</button>
@@ -2081,6 +2245,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
         </select>
         <div className="team-view-tabs">
           <button type="button" className={viewMode === 'focus' ? 'active' : ''} onClick={() => setViewMode('focus')}>今天</button>
+          <button type="button" className={viewMode === 'triage' ? 'active' : ''} onClick={() => setViewMode('triage')}>协作待办 <span>{triageQueues.total}</span></button>
           <button type="button" className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')}>任务表</button>
           <button type="button" className={viewMode === 'board' ? 'active' : ''} onClick={() => setViewMode('board')}>看板</button>
           <button type="button" className={viewMode === 'logs' ? 'active' : ''} onClick={() => setViewMode('logs')}>工时</button>
@@ -2146,6 +2311,49 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
             </section>
           </aside>
         </div>
+      )}
+
+      {viewMode === 'triage' && (
+        <section className="team-triage-view" aria-label="团队协作待办">
+          <header className="team-triage-header">
+            <div>
+              <span className="team-panel-eyebrow">Team Triage</span>
+              <h3>协作待办台</h3>
+              <p>只收拢需要团队决策的任务，不重复展示普通进行中工作。</p>
+            </div>
+            <div className="team-triage-summary">
+              <strong>{triageQueues.total}</strong>
+              <span>个任务需要处理</span>
+              <small>{leastLoadedMember ? `当前推荐接手：${leastLoadedMember}` : '添加成员后可使用智能分配'}</small>
+            </div>
+          </header>
+          {triageQueues.total === 0 ? (
+            <div className="team-empty-state team-triage-empty">
+              <strong>协作队列已清空</strong>
+              <span>没有待验收、阻塞、逾期、未分配或闭环不完整的任务。</span>
+            </div>
+          ) : (
+            <div className="team-triage-grid">
+              {triageSections.map((section) => (
+                <section key={section.kind} className={`team-triage-lane kind-${section.kind}`}>
+                  <header>
+                    <div><strong>{section.title}</strong><small>{section.hint}</small></div>
+                    <span>{section.tasks.length}</span>
+                  </header>
+                  <div className="team-triage-list">
+                    {section.tasks.length === 0
+                      ? <div className="team-triage-lane-empty">当前没有此类任务</div>
+                      : section.tasks.slice(0, 12).map((task) => renderTriageCard(task, section.kind))}
+                    {section.tasks.length > 12 && <button type="button" className="team-triage-more" onClick={() => {
+                      setViewMode('table');
+                      setQuery('');
+                    }}>还有 {section.tasks.length - 12} 个，在任务表中查看</button>}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+        </section>
       )}
 
       {viewMode === 'table' && (
@@ -2233,6 +2441,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
                       {latestReview && <div className={`team-last-review result-${latestReview.result}`} title={latestReview.note}>{REVIEW_RESULT_LABELS[latestReview.result]} · {latestReview.reviewer}</div>}
                     </td>
                     <td className="team-row-actions">
+                      <button type="button" onClick={() => openTaskDetails(task)}>详情</button>
                       <button type="button" className="review-approve" onClick={() => addReviewLog(task, 'approved')}>通过</button>
                       <button type="button" className="review-changes" onClick={() => addReviewLog(task, 'changes')}>退回</button>
                       <button type="button" className="review-note" onClick={() => addReviewLog(task, 'note')}>复查</button>
@@ -2267,6 +2476,7 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
                         </div>
                       )}
                       <div className="team-board-card-actions">
+                        <button type="button" onClick={() => openTaskDetails(task)}>详情</button>
                         <button type="button" onClick={() => addReviewLog(task, 'approved')}>通过</button>
                         <button type="button" onClick={() => addReviewLog(task, 'changes')}>退回</button>
                         <button type="button" onClick={() => void createOrOpenTaskDoc(task)}>{taskDocStatus(task, documentPathSet) === 'linked' ? '打开文档' : '生成文档'}</button>
@@ -2318,6 +2528,105 @@ const TeamSchedulePanel: React.FC<TeamSchedulePanelProps> = ({
         ))}
       </section>
       </details>
+
+      {selectedTask && (
+        <div className="team-task-drawer-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setSelectedTaskId(null);
+        }}>
+          <aside className="team-task-drawer" role="dialog" aria-modal="true" aria-label={`任务详情：${selectedTask.title}`}>
+            <header className="team-task-drawer-header">
+              <div>
+                <span className="team-panel-eyebrow">Task Detail</span>
+                <strong>任务详情</strong>
+                <small>{saveStateLabel} · 更新于 {formatLocalDateTime(selectedTask.updatedAt)}</small>
+              </div>
+              <button type="button" className="team-task-drawer-close" onClick={() => setSelectedTaskId(null)} aria-label="关闭任务详情">
+                <CloseIcon size={16} />
+              </button>
+            </header>
+
+            <div className="team-task-drawer-body">
+              <label className="team-task-drawer-title">
+                <span>任务名称</span>
+                <input value={selectedTask.title} onChange={(event) => updateTask(selectedTask.id, { title: event.target.value })} />
+              </label>
+
+              <div className="team-task-drawer-grid">
+                <label><span>负责人</span><input value={selectedTask.owner} onChange={(event) => updateTask(selectedTask.id, { owner: event.target.value })} list="team-members" /></label>
+                <label><span>状态</span><select value={selectedTask.status} onChange={(event) => updateTask(selectedTask.id, { status: event.target.value as TeamTaskStatus })}>{STATUS_ORDER.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}</select></label>
+                <label><span>优先级</span><select value={selectedTask.priority} onChange={(event) => updateTask(selectedTask.id, { priority: event.target.value as TeamTaskPriority })}>{(['high', 'medium', 'low'] as TeamTaskPriority[]).map((priority) => <option key={priority} value={priority}>{PRIORITY_LABELS[priority]}</option>)}</select></label>
+                <label><span>预计分钟</span><input type="number" min={0} step={15} value={selectedTask.estimateMinutes || ''} onChange={(event) => updateTask(selectedTask.id, { estimateMinutes: toMinutes(event.target.value) })} placeholder="例如 120" /></label>
+                <label><span>开始日期</span><input type="date" value={selectedTask.startDate} onChange={(event) => updateTask(selectedTask.id, { startDate: event.target.value })} /></label>
+                <label><span>截止日期</span><input type="date" value={selectedTask.dueDate} onChange={(event) => updateTask(selectedTask.id, { dueDate: event.target.value })} /></label>
+              </div>
+
+              <section className="team-task-drawer-progress">
+                <div><strong>{minutesToLabel(taskSpentMinutes(selectedTask))}</strong><span>已记录</span></div>
+                <div><strong>{selectedTask.estimateMinutes ? minutesToLabel(Math.max(0, selectedTask.estimateMinutes - taskSpentMinutes(selectedTask))) : '-'}</strong><span>预计剩余</span></div>
+                <div><strong>{taskProgressPercent(selectedTask)}%</strong><span>工时进度</span></div>
+                <div className={isOverdue(selectedTask) ? 'danger' : ''}><strong>{taskDueLabel(selectedTask)}</strong><span>交付时间</span></div>
+              </section>
+
+              <label className="team-task-drawer-doc">
+                <span>关联任务文档</span>
+                <div>
+                  <input value={selectedTask.linkedDoc} onChange={(event) => updateTask(selectedTask.id, { linkedDoc: normalizePath(event.target.value) })} placeholder="07_Unity_Tasks/..." list="team-documents" />
+                  <button type="button" onClick={() => void createOrOpenTaskDoc(selectedTask)} disabled={busy === `doc-${selectedTask.id}`}>
+                    <FileIcon size={12} /> {taskDocStatus(selectedTask, documentPathSet) === 'linked' ? '打开' : '生成'}
+                  </button>
+                </div>
+                {renderStatusPill(selectedTask)}
+              </label>
+
+              <div className="team-task-drawer-fields">
+                <label><span>交付物</span><textarea value={selectedTask.deliverable} onChange={(event) => updateTask(selectedTask.id, { deliverable: event.target.value })} placeholder="最终要交付什么结果" /></label>
+                <label><span>依赖</span><textarea value={selectedTask.dependency} onChange={(event) => updateTask(selectedTask.id, { dependency: event.target.value })} placeholder="开始前需要完成什么" /></label>
+                <label className={selectedTask.blocker ? 'danger' : ''}><span>阻塞原因</span><textarea value={selectedTask.blocker} onChange={(event) => {
+                  const blocker = event.target.value;
+                  updateTask(selectedTask.id, {
+                    blocker,
+                    status: blocker.trim() ? 'blocked' : selectedTask.status === 'blocked' ? 'doing' : selectedTask.status,
+                  });
+                }} placeholder="没有阻塞时保持为空" /></label>
+                <label className={!selectedTask.acceptance.trim() ? 'warning' : ''}><span>验收标准</span><textarea value={selectedTask.acceptance} onChange={(event) => updateTask(selectedTask.id, { acceptance: event.target.value })} placeholder="满足哪些条件才算完成" /></label>
+                <label className="wide"><span>内部备注</span><textarea value={selectedTask.notes} onChange={(event) => updateTask(selectedTask.id, { notes: event.target.value })} placeholder="补充背景、范围或交接说明" /></label>
+              </div>
+
+              <section className="team-task-drawer-history">
+                <header><strong>最近动态</strong><span>{selectedTask.logs.length + selectedTask.reviewLogs.length} 条</span></header>
+                {selectedTask.logs.length === 0 && selectedTask.reviewLogs.length === 0 ? (
+                  <div className="team-task-drawer-history-empty">还没有工时或验收记录。</div>
+                ) : (
+                  <div className="team-task-drawer-history-list">
+                    {[...selectedTask.logs.map((log) => ({ id: log.id, createdAt: log.createdAt, type: '工时', title: `${log.member} · ${minutesToLabel(log.minutes)}`, detail: log.note || log.date })), ...selectedTask.reviewLogs.map((log) => ({ id: log.id, createdAt: log.createdAt, type: '验收', title: `${log.reviewer} · ${REVIEW_RESULT_LABELS[log.result]}`, detail: log.note || log.date }))]
+                      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+                      .slice(0, 6)
+                      .map((item) => <article key={item.id}><span>{item.type}</span><div><strong>{item.title}</strong><small>{item.detail}</small></div></article>)}
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <footer className="team-task-drawer-footer">
+              <div>
+                {selectedTask.status === 'review' ? <>
+                  <button type="button" className="review-approve" onClick={() => addReviewLog(selectedTask, 'approved')}>通过验收</button>
+                  <button type="button" className="review-changes" onClick={() => addReviewLog(selectedTask, 'changes')}>退回修改</button>
+                </> : <button type="button" onClick={() => updateTask(selectedTask.id, { status: 'review' })}>提交验收</button>}
+                {activeSession?.taskId === selectedTask.id
+                  ? <button type="button" className="team-timer-stop" onClick={() => stopTimer(selectedTask.id)}>结束计时</button>
+                  : <button type="button" className="team-timer-start" disabled={!!activeSession} onClick={() => startTimer(selectedTask)}><ClockIcon size={12} /> 开始工作</button>}
+              </div>
+              <button type="button" className="team-task-delete" onClick={() => {
+                if (!window.confirm(`确定删除任务“${selectedTask.title}”吗？`)) return;
+                deleteTask(selectedTask.id);
+                setSelectedTaskId(null);
+                setExportMsg(`已删除任务：${selectedTask.title}`);
+              }}>删除任务</button>
+            </footer>
+          </aside>
+        </div>
+      )}
 
       <datalist id="team-documents">
         {documentPaths.map((path) => <option key={path} value={path} />)}

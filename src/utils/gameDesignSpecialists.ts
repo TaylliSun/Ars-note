@@ -29,6 +29,8 @@ export interface GameDesignSpecialistRoute {
 const PLANNING_INTENT_RE = /策划|设计案|策划案|需求文档|玩法|机制|系统|数值|平衡|经济|成长|关卡|战斗|技能|剧情|世界观|任务(?:设计|策划|系统|表|流程|链)|台词|演出|cutscene|unity|技术方案|架构|编辑器|工具链|\bui\b|\bux\b|交互|商业化|付费|活动设计|留存|gdd|game\s*design|system\s*design|level\s*design|combat\s*design|technical\s*design|economy|balance|progression|quest|narrative|live\s*ops/i;
 
 const CORE_LOOP_INTENT_RE = /核心(?:玩法|体验)?循环|游戏(?:玩法)?循环|玩法闭环|行为闭环|秒级循环|局内循环|单局循环|会话循环|局外循环|成长循环|长期循环|core\s*(?:gameplay\s*)?loop|gameplay\s*loop|moment[-\s]to[-\s]moment|session\s*loop|meta\s*loop|progression\s*loop/i;
+const FULL_GDD_INTENT_RE = /(?:完整|整体|全局|正式|生产级|专业).{0,16}(?:gdd|游戏设计文档|游戏策划案)|(?:写|生成|创建|完善|更新|修订|重构).{0,20}(?:gdd|游戏设计文档|游戏策划案)|(?:full|complete|production[-\s]ready).{0,12}(?:gdd|game\s+design\s+document)/i;
+const GDD_PATH_RE = /(?:^|\/)(?:gdd|newgdd|game[-_ ]?design(?:spec|document)?|[^/]*[_-]gdd)\.md$/i;
 
 export const GAME_DESIGN_SPECIALISTS: GameDesignSpecialistDefinition[] = [
   {
@@ -274,6 +276,18 @@ export function buildGameDesignSpecialistBrief(input: {
     ...route.reviewers.flatMap((reviewer) => reviewer.evidencePaths),
   ])).slice(0, 8);
   const source = `${input.prompt}\n${input.currentFilePath || ''}`;
+  const fullGddProtocol = (FULL_GDD_INTENT_RE.test(source) || GDD_PATH_RE.test(String(input.currentFilePath || '').replace(/\\/g, '/')))
+    ? [
+        'Full GDD causal architecture protocol:',
+        '- Build one causal spine before drafting sections: target player + player promise -> immediate goal -> meaningful choice/action -> rule resolution -> readable feedback -> reward/cost -> spend/transform -> progression/unlock -> changed next decision -> explicit re-entry.',
+        '- A core loop is a closed state transition, not a feature category. Combat, collection, construction, exploration, dialogue, or management may be one action/subsystem, but none is the complete loop unless its output changes progression and creates the reason and decision for the next run.',
+        '- Organize the GDD in dependency order: design thesis and non-goals -> experience horizons -> canonical core loop -> meta/progression and economy -> system topology -> content/challenge progression -> failure/recovery -> UX/feedback -> production/technology -> validation and decision ledger.',
+        '- Connect moment-to-moment, encounter/task, session, meta/progression, and long-term mastery. Explicitly state what each horizon consumes, what it outputs, and how that output changes the horizon below when the player returns.',
+        '- Every major system section must state: role in the core loop, player goal, inputs, meaningful decisions, rules/state changes, outputs, dependencies, feedback, failure/recovery, tuning owner, and acceptance evidence. Delete or defer systems that cannot justify a loop role.',
+        '- Add a system-topology table and a traceability table so readers can follow player value -> loop step -> supporting system -> resource/data -> UI feedback -> content/engineering owner -> validation evidence.',
+        '- Before writing, run a logic audit. Reject the draft if rewards have no sink, progression does not change later decisions, failure has no recovery/re-entry, section claims contradict the causal spine, or the document reads as an inventory of unrelated features.',
+      ]
+    : [];
   const coreLoopProtocol = CORE_LOOP_INTENT_RE.test(source)
     ? [
         'Core loop design protocol:',
@@ -305,9 +319,58 @@ export function buildGameDesignSpecialistBrief(input: {
     '- Use numbers with units, baselines, formulas, examples, ranges, caps, and tuning ownership whenever the design is quantitative.',
     '- Run contradiction, exploit, edge-case, failure/recovery, save/migration, performance, accessibility, localization, and QA checks where relevant.',
     '- Convert approved design into discipline-tagged tasks with dependency, estimate, linked document, acceptance, QA/retest, and status. Do not write team schedule tasks unless the user asked to create/assign/take over work.',
+    '- Write in the voice of the accountable primary specialist. Lead with decisions and evidence, vary paragraph rhythm, and remove canned Chinese/English transitions, inflated claims, consultant language, and generic summaries.',
+    '- Do not use polished prose to hide a missing rule. Replace “improves the experience” with the exact player behavior, state change, production requirement, or observation that supports the claim.',
+    ...fullGddProtocol,
     ...coreLoopProtocol,
     'Completion gate:',
     '- Do not claim quality scores such as 100/100. Report Passed, Needs review, or Blocked for each applicable gate and name the exact unresolved evidence.',
+  ].join('\n');
+}
+
+export function buildGameDesignGovernanceBrief(input: {
+  prompt: string;
+  currentFilePath?: string;
+}): string {
+  const route = routeGameDesignSpecialists(input);
+  if (!route) return '';
+
+  const source = `${input.prompt}\n${input.currentFilePath || ''}`;
+  const revision = route.requestedArtifact === 'design-repair';
+  const reviewOnly = route.requestedArtifact === 'design-review';
+  const wholeProject = /整体|全局|完整\s*gdd|总案|全项目|全部策划|所有策划|whole\s+project|full\s+gdd/i.test(source);
+  const target = input.currentFilePath?.trim() || '(discover the existing canonical document before choosing a path)';
+
+  return [
+    '=== Lead Designer Scope & Version Governance ===',
+    `Work posture: ${reviewOnly ? 'critique before mutation' : revision ? 'convergent revision' : 'bounded design proposal'}`,
+    `Canonical target: ${target}`,
+    'Single-source-of-truth rules:',
+    `- ${revision ? 'Update the inspected canonical document in place.' : 'Prefer an existing canonical document; create at most one new primary design document only when no suitable source exists or the user explicitly asks for one.'}`,
+    '- Do not create v2/v3, final, new, optimized, rewritten, copy, duplicate, dated, or companion variants of a design document unless the user explicitly requests a historical branch.',
+    '- Keep one approved rule in one authoritative location. Other documents should link to it and contain only their discipline-specific consequences, not copied competing definitions.',
+    '- Treat chat drafts, merge files, visual summaries, and recovered copies as evidence, never as a second source of truth.',
+    'Diagnosis before expansion:',
+    '- Identify the player or production problem, current evidence, affected core-loop link, contradictions, and the smallest decision that resolves it.',
+    '- Report weaknesses first, ordered by severity: finding -> evidence -> player/production consequence -> recommended decision. Do not praise by default and do not hide uncertainty.',
+    '- Separate confirmed canon, approved decisions, assumptions, rejected options, deferred ideas, and open questions.',
+    'Innovation test:',
+    '- Innovation means a stronger player decision, interaction, expression, emotional payoff, or production method, not a larger feature count.',
+    '- For each proposed innovation state: player value, differentiator, fit with product pillars/core loop, implementation/content cost, main risk, cheapest prototype, and kill/continue evidence.',
+    '- Compare at least two materially different options for a major decision, including the option to simplify or remove it. Recommend one and explain the tradeoff.',
+    'Scope and schedule gate:',
+    `- Work inside ${wholeProject ? 'an explicit whole-project scope budget' : 'the current feature or milestone boundary'}; define In scope, Non-goals, Deferred, and Removed before adding detail.`,
+    '- Classify every requested or discovered addition as Required now, Replace existing, Defer, or Reject. Optional ideas go to a short parking-lot list, not into the committed design.',
+    '- A new system, content family, platform, mode, resource, narrative branch, or tool may enter committed scope only with owner, estimate, dependency, acceptance test, and schedule impact.',
+    '- No silent scope growth: an addition must replace/remove comparable work, fit the stated reserve, or be marked Blocked pending an explicit milestone change.',
+    '- Prefer the smallest playable/testable slice. Cap recommendations to the few decisions that materially improve the current milestone.',
+    'Required decision ledger for substantial work:',
+    '- Added | Changed | Removed | Deferred | Rejected.',
+    '- Net scope: smaller / unchanged / larger. Schedule impact: reduced / neutral / +N person-days or unknown-blocked.',
+    '- Affected canonical documents, systems, data, UI, engineering, content, QA, migration, owner, and acceptance evidence.',
+    'Completion gate:',
+    '- A design is not complete because it is long. It is ready only when the core decision is coherent, scope is bounded, dependencies and acceptance are explicit, and unresolved items cannot silently expand the milestone.',
+    '- If critical evidence, schedule budget, or authority is missing, return Needs review or Blocked with one concrete decision request instead of inventing more design.',
   ].join('\n');
 }
 
@@ -321,6 +384,22 @@ For game-planning work, follow the Professional Game Design Studio Brief supplie
 - Write for implementation and review, not for inspiration alone. Every major decision needs behavior, data/config, feedback, owner, acceptance, and risk implications.
 - Mark confirmed facts, decisions, assumptions, and open questions separately.
 - For core-loop work, prove the re-entry link between moment-to-moment play, session goals, progression, and long-term motivation. A list of systems or rewards is not a loop.
+- For a full GDD, build and preserve one causal spine across every section. Combat is never accepted as the whole core loop merely because it is the most detailed subsystem.
+- Audit reward destinations, resource sinks, progression effects, changed next-run decisions, failure recovery, and explicit re-entry before writing the canonical GDD.
 - For revisions, include a concise change-impact section covering affected documents, systems, data, UI, engineering, content, QA, schedule, and migration.
 - For professional documents, finish with discipline review gates and concrete next tasks. Do not invent a numeric quality score.
+`;
+
+export const GAME_DESIGN_GOVERNANCE_SYSTEM_PROMPT = `
+
+Lead Designer Governance Protocol
+
+For game-design work, the Lead Designer Scope & Version Governance brief is mandatory.
+- Diagnose before generating. A larger document is not a better design.
+- Maintain one canonical document per design responsibility. Revise it in place and link to it instead of creating competing versions.
+- Challenge weak logic, contradictions, unsupported assumptions, content burden, and schedule risk directly.
+- Test innovation by player value, differentiation, core-loop fit, cost, prototype evidence, and a kill criterion.
+- Bound the current milestone with explicit non-goals. New committed scope needs a replacement/removal or an explicit schedule decision.
+- End substantial changes with a decision ledger and net scope/schedule impact.
+- Prefer cutting, merging, deferring, or simplifying when those choices protect the product pillars better than expansion.
 `;

@@ -1,0 +1,57 @@
+# Ars-note public deployment behind an HTTPS reverse proxy.
+# Do not publish port 8787 on the router. Only the local reverse proxy should
+# reach 127.0.0.1:8787; Internet clients connect to HTTPS/WSS on port 443.
+
+services:
+  ars-note-sync:
+    image: node:22-slim
+    container_name: ars-note-sync
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8787:8787"
+    working_dir: /app
+    user: "${ARS_NOTE_UID:-1000}:${ARS_NOTE_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      - ARSNOTE_PORT=8787
+      - ARSNOTE_HOST=0.0.0.0
+      - ARS_NOTE_SERVER_API_KEY=${ARS_NOTE_SERVER_API_KEY:?Set a random 32+ character ARS_NOTE_SERVER_API_KEY in .env}
+      - ARS_NOTE_REQUIRE_API_KEY=true
+      - ARS_NOTE_MIN_API_KEY_LENGTH=32
+      - ARS_NOTE_SECURITY_MODE=public
+      - ARS_NOTE_TRUST_PROXY=true
+      - ARS_NOTE_REQUIRE_HTTPS=true
+      - ARS_NOTE_ALLOWED_ORIGINS=${ARS_NOTE_ALLOWED_ORIGINS:-null}
+      - ARS_NOTE_ALLOW_API_KEY_IN_QUERY=false
+      - ARS_NOTE_AUTH_FAILURE_LIMIT=8
+      - ARS_NOTE_AUTH_FAILURE_WINDOW_SECONDS=60
+      - ARS_NOTE_AUTH_BLOCK_SECONDS=900
+      - ARS_NOTE_MAX_WS_CONNECTIONS=200
+      - ARS_NOTE_MAX_WS_CONNECTIONS_PER_IP=16
+      - ARS_NOTE_MAX_WS_MESSAGES_PER_MINUTE=1200
+      - ARS_NOTE_STORAGE_BACKEND=local
+      - ARS_NOTE_ALLOW_LEGACY_LIVE_WRITES=false
+      - ARS_NOTE_MAX_HTTP_BODY_BYTES=67108864
+      - ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES=67108864
+      - ARS_NOTE_MAX_HTTP_HEADER_BYTES=16384
+      - ARS_NOTE_HTTP_REQUEST_TIMEOUT_MS=120000
+      - ARS_NOTE_HTTP_HEADERS_TIMEOUT_MS=30000
+      - TZ=Asia/Shanghai
+      - ARS_NOTE_TIMEZONE=Asia/Shanghai
+    volumes:
+      - ./server/dist:/app/dist:ro
+      - ./sync-data:/app/server-data
+    command: ["node", "dist/index.js"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http=require('http');http.get('http://localhost:8787/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

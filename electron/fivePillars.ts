@@ -16,8 +16,11 @@ const HISTORY_DIR = 'history';
 const CURRENT_SESSION_FILE = 'current-session.json';
 const CRONS_FILE = 'crons.json';
 const EVOLUTION_DIR = 'evolution';
-const MEMORY_CAP = 2200;
+const WORKFLOW_CANDIDATES_FILE = 'workflow-candidates.json';
+const MEMORY_CAP = 16000;
 const MAX_CONVERSATION_HISTORY = 12;
+const WORKFLOW_PROMOTION_THRESHOLD = 2;
+const MAX_WORKFLOW_CANDIDATES = 80;
 
 function aiDir(vp: string): string { return path.join(vp, AI_DIR); }
 function ensureDir(dir: string): void { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
@@ -56,6 +59,66 @@ function uniqueSkillId(dir: string, baseId: string): string {
     suffix++;
   }
   return candidate;
+}
+
+function singleLine(value: unknown, maxLength = 1200): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+function normalizeComparableText(value: unknown): string {
+  return singleLine(value).normalize('NFKC').toLowerCase();
+}
+
+function buildSkillContent(skill: { name: string; trigger: string; description: string; steps: string }, createdAt?: string): string {
+  const ts = new Date().toISOString();
+  return `---
+name: ${singleLine(skill.name, 160)}
+trigger: ${singleLine(skill.trigger, 240)}
+description: ${singleLine(skill.description, 320)}
+created: ${createdAt || ts}
+updated: ${ts}
+use_count: 0
+success_rate: 0
+last_used:
+---
+
+${String(skill.steps || '').trim()}
+`;
+}
+
+function normalizeWorkflowIntent(value: string): string {
+  return singleLine(value, 600)
+    .replace(/[A-Za-z]:[\\/][^\s"'<>|*?]+/g, '<path>')
+    .replace(/(?:[\w\u4e00-\u9fff ._-]+[\\/])+[\w\u4e00-\u9fff ._-]+\.(?:md|json|canvas|excalidraw)/gi, '<path>')
+    .replace(/\b\d+(?:\.\d+)?\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export interface RelevantSkillMatch {
+  id: string;
+  name: string;
+  trigger: string;
+  score: number;
+  context: string;
+}
+
+interface WorkflowCandidate {
+  signature: string;
+  intent: string;
+  example: string;
+  toolNames: string[];
+  successCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  promotedSkillId?: string;
+}
+
+export interface WorkflowObservationResult {
+  observed: boolean;
+  successCount: number;
+  promotedSkillId?: string;
 }
 
 /* ═══════════════════════════════════════════
@@ -139,7 +202,7 @@ export function getMemoryStatus(vp: string) {
     memoryCap: MEMORY_CAP,
     userSize: userContent.length,
     historyCount,
-    needsConsolidation: memContent.length > MEMORY_CAP * 0.8,
+    needsConsolidation: memContent.length > MEMORY_CAP,
   };
 }
 
@@ -148,8 +211,16 @@ export function readMemory(vp: string): string { return readText(path.join(aiDir
 export function appendMemory(vp: string, entry: string): void {
   const fp = path.join(aiDir(vp), MEMORY_FILE);
   const current = readText(fp);
+  const cleanEntry = singleLine(entry);
+  if (!cleanEntry) return;
+  const comparable = normalizeComparableText(cleanEntry);
+  const duplicate = current.split(/\r?\n/).some(line => {
+    const match = line.match(/^\s*-\s+\[.*?\]\s*(?:\[locked\]\s*)?(.*)$/i);
+    return !!match && normalizeComparableText(match[1]) === comparable;
+  });
+  if (duplicate) return;
   const timestamp = new Date().toISOString().split('T')[0];
-  const newLine = `\n- [${timestamp}] ${entry.trim()}`;
+  const newLine = `\n- [${timestamp}] ${cleanEntry}`;
   writeText(fp, current + newLine);
 }
 
@@ -197,19 +268,60 @@ export function setMemoryEntryLocked(vp: string, lineIndex: number, locked: bool
 export function consolidateMemory(vp: string): string {
   const fp = path.join(aiDir(vp), MEMORY_FILE);
   const current = readText(fp);
-  if (current.length <= MEMORY_CAP * 0.8) return 'No consolidation needed.';
+  if (current.length <= MEMORY_CAP) return 'No consolidation needed.';
 
-  // Keep header and last 500 chars, mark as consolidated
-  const header = current.split('\n').slice(0, 2).join('\n');
-  const lockedLines = current.split(/\r?\n/).filter(line => /^\s*-\s+\[.*?\]\s*\[locked\]/i.test(line));
-  const lockedBlock = lockedLines.length > 0
-    ? '\n\n## Locked Memory\n' + Array.from(new Set(lockedLines)).join('\n')
-    : '';
-  const consolidated = current.length > MEMORY_CAP
-    ? header + lockedBlock + '\n\n[Consolidated ' + new Date().toISOString().split('T')[0] + ']\n' + current.slice(-800)
-    : current;
+  const consolidated = buildMemoryContext(current, MEMORY_CAP);
+  if (consolidated === current) return 'No consolidation needed.';
+  const archiveName = `memory-${new Date().toISOString().replace(/[:.]/g, '-')}.md`;
+  writeText(path.join(aiDir(vp), HISTORY_DIR, archiveName), current);
   writeText(fp, consolidated);
   return `Consolidated: ${current.length} -> ${consolidated.length} chars`;
+}
+
+export function buildMemoryContext(memory: string, maxChars = MEMORY_CAP): string {
+  const source = String(memory || '').trim();
+  if (!source || source.length <= maxChars) return source;
+
+  const lines = source.split(/\r?\n/);
+  const firstEntryIndex = lines.findIndex(line => /^\s*-\s+\[.*?\]/.test(line));
+  const header = (firstEntryIndex >= 0 ? lines.slice(0, firstEntryIndex) : lines.slice(0, 2))
+    .join('\n')
+    .trim()
+    .slice(0, 1600);
+  const entries = lines.filter(line => /^\s*-\s+\[.*?\]/.test(line));
+  if (entries.length === 0) {
+    const paragraphs = source.split(/\n{2,}/);
+    const selected: string[] = [];
+    let used = 0;
+    for (let index = paragraphs.length - 1; index >= 0; index--) {
+      const paragraph = paragraphs[index].trim();
+      if (!paragraph) continue;
+      if (used + paragraph.length + 2 > maxChars && selected.length > 0) break;
+      selected.unshift(paragraph);
+      used += paragraph.length + 2;
+    }
+    return selected.join('\n\n').slice(-maxChars);
+  }
+
+  const locked = Array.from(new Set(entries.filter(line => /\]\s*\[locked\]/i.test(line))));
+  const recentCandidates = entries.filter(line => !/\]\s*\[locked\]/i.test(line));
+  const recent: string[] = [];
+  const fixedLength = header.length
+    + (locked.length ? locked.join('\n').length + 24 : 0)
+    + 36;
+  let used = fixedLength;
+  for (let index = recentCandidates.length - 1; index >= 0; index--) {
+    const line = recentCandidates[index];
+    if (used + line.length + 1 > maxChars && recent.length > 0) break;
+    recent.unshift(line);
+    used += line.length + 1;
+  }
+
+  return [
+    header,
+    locked.length ? `## Locked Memory\n${locked.join('\n')}` : '',
+    recent.length ? `## Recent Memory\n${recent.join('\n')}` : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 export function readSoul(vp: string): string { return readText(path.join(aiDir(vp), SOUL_FILE)); }
@@ -301,9 +413,6 @@ export function loadLatestConversation(vp: string): Array<{ role: string; conten
     const current = readConversationCandidate(path.join(dir, CURRENT_SESSION_FILE));
     if (current) candidates.push(current);
 
-    const liveSession = readConversationCandidate(path.join(aiDir(vp), 'live-session.json'));
-    if (liveSession) candidates.push(liveSession);
-
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && f !== CURRENT_SESSION_FILE).sort();
     if (files.length > 0) {
       const latest = readConversationCandidate(path.join(dir, files[files.length - 1]));
@@ -354,21 +463,7 @@ export function createSkill(vp: string, skill: { name: string; trigger: string; 
   const dir = path.join(aiDir(vp), SKILLS_DIR);
   ensureDir(dir);
   const id = uniqueSkillId(dir, skillIdFromName(skill.name));
-  const ts = new Date().toISOString();
-  const content = `---
-name: ${skill.name}
-trigger: ${skill.trigger}
-description: ${skill.description}
-created: ${ts}
-updated: ${ts}
-use_count: 0
-success_rate: 0
-last_used:
----
-
-${skill.steps}
-`;
-  writeText(path.join(dir, `${id}.md`), content);
+  writeText(path.join(dir, `${id}.md`), buildSkillContent(skill));
   return id;
 }
 
@@ -401,12 +496,12 @@ export function deleteSkill(vp: string, skillId: string): void {
   if (fs.existsSync(fp)) fs.unlinkSync(fp);
 }
 
-export function getRelevantSkills(vp: string, query: string): string {
+export function getRelevantSkillMatches(vp: string, query: string, limit = 3): RelevantSkillMatch[] {
   const skills = listSkills(vp);
-  if (skills.length === 0) return '';
+  if (skills.length === 0) return [];
   const queryLower = query.toLowerCase();
   const queryTokens = tokenizeVaultRetrievalText(queryLower, 64);
-  const relevant = skills
+  return skills
     .map(skill => {
       const searchText = `${skill.name} ${skill.trigger} ${skill.description} ${skill.steps}`.toLowerCase();
       let score = 0;
@@ -416,13 +511,87 @@ export function getRelevantSkills(vp: string, query: string): string {
       }
       score += Math.min(3, Number(skill.useCount || 0)) * 0.25;
       score += Math.max(0, Math.min(100, Number(skill.successRate || 0))) / 200;
-      return { skill, score };
+      return {
+        id: String(skill.id || ''),
+        name: String(skill.name || ''),
+        trigger: String(skill.trigger || ''),
+        score,
+        context: `### Skill: ${skill.name}\nTrigger: ${skill.trigger}\n${skill.steps}`,
+      };
     })
     .filter(item => item.score >= 2)
     .sort((left, right) => right.score - left.score)
-    .map(item => item.skill);
-  if (relevant.length === 0) return '';
-  return relevant.slice(0, 3).map(s => `### Skill: ${s.name}\nTrigger: ${s.trigger}\n${s.steps}`).join('\n\n');
+    .slice(0, Math.max(1, Math.min(8, limit)));
+}
+
+export function getRelevantSkills(vp: string, query: string): string {
+  return getRelevantSkillMatches(vp, query).map(match => match.context).join('\n\n');
+}
+
+export function observeReusableWorkflow(
+  vp: string,
+  observation: { userText: string; toolNames: string[]; successful: boolean },
+): WorkflowObservationResult {
+  const intent = normalizeWorkflowIntent(observation.userText);
+  const toolNames = (observation.toolNames || [])
+    .map(name => singleLine(name, 120))
+    .filter(Boolean)
+    .slice(0, 16);
+  if (!observation.successful || intent.length < 8 || toolNames.length === 0) {
+    return { observed: false, successCount: 0 };
+  }
+
+  const signature = stableHash(`${intent}\n${toolNames.join('>')}`);
+  const fp = path.join(aiDir(vp), WORKFLOW_CANDIDATES_FILE);
+  const candidates = readJSON<WorkflowCandidate[]>(fp, []);
+  const now = new Date().toISOString();
+  let candidate = candidates.find(item => item.signature === signature);
+  if (!candidate) {
+    candidate = {
+      signature,
+      intent,
+      example: singleLine(observation.userText, 240),
+      toolNames,
+      successCount: 0,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+    candidates.push(candidate);
+  }
+  candidate.successCount += 1;
+  candidate.lastSeenAt = now;
+
+  if (candidate.successCount >= WORKFLOW_PROMOTION_THRESHOLD && !candidate.promotedSkillId) {
+    const skillId = `learned-${signature}`;
+    const skillPath = path.join(aiDir(vp), SKILLS_DIR, `${skillId}.md`);
+    ensureDir(path.dirname(skillPath));
+    if (!fs.existsSync(skillPath)) {
+      writeText(skillPath, buildSkillContent({
+        name: `Learned workflow ${signature}`,
+        trigger: candidate.example,
+        description: `Promoted after ${candidate.successCount} successful executions in Ars-note.`,
+        steps: [
+          '## Reusable execution pattern',
+          '',
+          `Intent pattern: ${candidate.intent}`,
+          `Tool sequence: ${candidate.toolNames.join(' -> ')}`,
+          '',
+          'Re-read the current target, apply only the requested scope, verify every mutation, and report exact changed paths.',
+        ].join('\n'),
+      }));
+    }
+    candidate.promotedSkillId = skillId;
+  }
+
+  const retained = candidates
+    .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
+    .slice(0, MAX_WORKFLOW_CANDIDATES);
+  writeJSON(fp, retained);
+  return {
+    observed: true,
+    successCount: candidate.successCount,
+    promotedSkillId: candidate.promotedSkillId,
+  };
 }
 
 /* ═══════════════════════════════════════════
@@ -492,7 +661,7 @@ export function buildFivePillarContext(vp: string): string {
 
   // Memory (always loaded, capped)
   const memory = readMemory(vp);
-  if (memory && memory.length > 50) sections.push('=== MEMORY ===\n' + memory.slice(-MEMORY_CAP));
+  if (memory && memory.length > 50) sections.push('=== MEMORY ===\n' + buildMemoryContext(memory, MEMORY_CAP));
 
   // Active crons summary
   const crons = listCrons(vp).filter((c: any) => c.enabled);

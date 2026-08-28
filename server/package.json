@@ -1,7 +1,7 @@
 {
   "name": "ars-note-sync-server",
   "private": true,
-  "version": "1.5.64",
+  "version": "1.5.67",
   "license": "GPL-3.0-only",
   "description": "Ars-note Self-hosted Sync Server \u2014 zero external dependencies",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     "typecheck": "npx tsc --noEmit",
     "test": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
     "smoke:selfhosted": "node scripts/smoke-test-selfhosted.mjs",
+    "smoke:isolated": "npm run build && node scripts/smoke-test-isolated.mjs",
     "ops:backup": "node scripts/ops/backup-server-data.mjs",
     "ops:restore": "node scripts/ops/restore-server-data.mjs",
     "ops:health": "node scripts/ops/check-server-health.mjs http://localhost:3141",

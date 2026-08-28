@@ -1,14 +1,15 @@
 /* ── Live Preview Extension for CodeMirror 6 ────────── */
-/* Renders markdown inline — like Obsidian's Live Preview */
+/* Renders Markdown inline in Ars-note Live Preview */
 /* Uses CM6 decoration system on the Lezer parse tree     */
 
 import {
-  EditorView, Decoration, DecorationSet, WidgetType
+  EditorView, Decoration, DecorationSet, ViewPlugin, WidgetType
 } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
-import { EditorState, Extension, Range, StateField } from '@codemirror/state';
+import { EditorState, Extension, Range, StateEffect, StateField } from '@codemirror/state';
 import { CompletionContext, CompletionResult } from '@codemirror/autocomplete';
 import { repairCompressedMarkdownTable } from './markdownTableRepair';
+import { sanitizeMarkdownHref } from './markdownRenderer';
 import {
   escapeMarkdownTableCell as escapeTableCell,
   formatMarkdownTableRow,
@@ -135,6 +136,30 @@ class CodeBlockWidget extends WidgetType {
 type TableSourceLine = { text: string; isSep: boolean; cells: string[] };
 type TableRowKind = 'header' | 'body' | 'metadata' | 'separator';
 
+function sameStringArray(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameTableCellSpans(left: readonly TableCellSpan[], right: readonly TableCellSpan[]) {
+  return left.length === right.length && left.every((value, index) => (
+    value.from === right[index]?.from && value.to === right[index]?.to
+  ));
+}
+
+function sameTableRows(left: readonly string[][], right: readonly string[][]) {
+  return left.length === right.length && left.every((row, index) => sameStringArray(row, right[index] || []));
+}
+
+function sameTableSourceLines(left: readonly TableSourceLine[], right: readonly TableSourceLine[]) {
+  return left.length === right.length && left.every((line, index) => {
+    const candidate = right[index];
+    return Boolean(candidate)
+      && line.text === candidate.text
+      && line.isSep === candidate.isSep
+      && sameStringArray(line.cells, candidate.cells);
+  });
+}
+
 function sanitizeColorValue(value: string): string | null {
   const color = value.trim();
   if (/^#[0-9a-fA-F]{3,8}$/.test(color)) return color;
@@ -234,7 +259,11 @@ function renderCellMarkdown(text: string): string {
     /* Strikethrough: ~~text~~ */
     .replace(/~~(.+?)~~/g, '<del style="opacity:0.6">$1</del>')
     /* Links: [text](url) */
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#9cc6ff;text-decoration:underline">$1</a>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, rawHref) => {
+      const href = sanitizeMarkdownHref(rawHref);
+      if (!href) return `<span class="cm-lp-link-invalid">${label}</span>`;
+      return `<a href="${escapeHtmlAttribute(href)}" target="_blank" rel="noreferrer" style="color:#9cc6ff;text-decoration:underline">${label}</a>`;
+    })
     /* Wiki links: [[text]] */
     .replace(/\[\[([^\]]+)\]\]/g, (_match, wikiTarget) => renderWikiLink(wikiTarget));
   safeSpans.forEach((span, index) => {
@@ -287,11 +316,6 @@ class TableLineWidget extends WidgetType {
 
     if (this.kind === 'separator') {
       row.setAttribute('aria-hidden', 'true');
-      for (let ci = 0; ci < this.colCount; ci++) {
-        const cell = document.createElement('span');
-        cell.className = 'cm-lp-table-line-cell';
-        row.appendChild(cell);
-      }
     } else {
       for (let ci = 0; ci < this.colCount; ci++) {
         const cell = document.createElement('span');
@@ -303,7 +327,8 @@ class TableLineWidget extends WidgetType {
         if (readOnly) {
           cell.innerHTML = renderCellMarkdown(sourceText);
         } else {
-          this.configureEditableCell(cell, sourceText, view, ci);
+          cell.classList.add('cm-lp-table-cell-ready');
+          cell.innerHTML = renderCellMarkdown(sourceText);
         }
         row.appendChild(cell);
       }
@@ -344,10 +369,23 @@ class TableLineWidget extends WidgetType {
     });
     row.addEventListener('click', event => {
       if (openWikiFromEvent(event)) return;
+      if (event.target instanceof Element && event.target.closest('.cm-lp-table-cell-editable')) {
+        event.stopPropagation();
+        return;
+      }
+      const tableCell = event.target instanceof Element
+        ? event.target.closest<HTMLElement>('[data-cell-index]')
+        : null;
+      if (!readOnly && tableCell) {
+        event.preventDefault();
+        event.stopPropagation();
+        const cellIndex = Number(tableCell.dataset.cellIndex || 0);
+        this.activateEditableCell(tableCell, this.cells[cellIndex] || '', view, cellIndex);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
     });
-    requestAnimationFrame(() => view.requestMeasure());
     return row;
   }
 
@@ -407,64 +445,82 @@ class TableLineWidget extends WidgetType {
     requestAnimationFrame(() => view.requestMeasure());
   }
 
-  private configureEditableCell(cell: HTMLElement, sourceText: string, view: EditorView, cellIndex: number) {
+  private activateEditableCell(cell: HTMLElement, sourceText: string, view: EditorView, cellIndex: number) {
+    if (cell.isContentEditable) {
+      cell.focus();
+      return;
+    }
+
+    cell.classList.remove('cm-lp-table-cell-ready');
+    cell.classList.add('cm-lp-table-cell-editable');
     cell.textContent = sourceText;
     cell.contentEditable = 'plaintext-only';
     cell.spellcheck = false;
-    cell.classList.add('cm-lp-table-cell-editable');
 
     let lastCommitted = sourceText;
-    const stop = (event: Event) => event.stopPropagation();
+    const listeners = new AbortController();
+    const renderInactive = () => {
+      listeners.abort();
+      cell.contentEditable = 'false';
+      cell.classList.remove('cm-lp-table-cell-editable');
+      cell.classList.add('cm-lp-table-cell-ready');
+      cell.innerHTML = renderCellMarkdown(lastCommitted);
+    };
     const commit = () => {
       const nextValue = normalizeEditableTableCellInput(cell.textContent || '');
-      if (nextValue === lastCommitted) return;
+      if (nextValue === lastCommitted) {
+        renderInactive();
+        return;
+      }
       lastCommitted = nextValue;
       const span = this.cellSpans[cellIndex] || this.cellSpans[0];
-      if (!span) return;
+      if (!span) {
+        renderInactive();
+        return;
+      }
       const from = Math.max(this.lineFrom, Math.min(this.lineTo, this.lineFrom + span.from));
       const to = Math.max(from, Math.min(this.lineTo, this.lineFrom + span.to));
       view.dispatch({ changes: { from, to, insert: escapeTableCell(nextValue) } });
       requestAnimationFrame(() => view.requestMeasure());
     };
 
-    cell.addEventListener('mousedown', stop);
-    cell.addEventListener('mouseup', stop);
-    cell.addEventListener('click', stop);
-    cell.addEventListener('dblclick', stop);
-    cell.addEventListener('beforeinput', stop);
-    cell.addEventListener('input', stop);
-    cell.addEventListener('compositionstart', stop);
-    cell.addEventListener('compositionupdate', stop);
-    cell.addEventListener('compositionend', stop);
-    cell.addEventListener('paste', stop);
-    cell.addEventListener('copy', stop);
-    cell.addEventListener('cut', stop);
-    cell.addEventListener('focus', () => cell.classList.add('cm-lp-table-cell-editing'));
-    cell.addEventListener('blur', () => {
-      cell.classList.remove('cm-lp-table-cell-editing');
-      commit();
-    });
+    const stopClipboardPropagation = (event: Event) => event.stopPropagation();
+    const listenerOptions = { signal: listeners.signal };
+    cell.addEventListener('paste', stopClipboardPropagation, listenerOptions);
+    cell.addEventListener('copy', stopClipboardPropagation, listenerOptions);
+    cell.addEventListener('cut', stopClipboardPropagation, listenerOptions);
+    cell.addEventListener('blur', commit, listenerOptions);
     cell.addEventListener('keydown', event => {
       event.stopPropagation();
       if (event.key === 'Enter') {
         event.preventDefault();
-        commit();
         cell.blur();
       } else if (event.key === 'Escape') {
         event.preventDefault();
-        cell.textContent = lastCommitted;
-        cell.blur();
+        renderInactive();
+        view.focus();
       }
-    });
+    }, listenerOptions);
+
+    cell.focus();
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    requestAnimationFrame(() => view.requestMeasure());
   }
 
   ignoreEvent() { return true; }
 
   eq(other: TableLineWidget) {
-    return JSON.stringify(other.cells) === JSON.stringify(this.cells)
-      && JSON.stringify(other.cellSpans) === JSON.stringify(this.cellSpans)
+    return sameStringArray(other.cells, this.cells)
+      && sameTableCellSpans(other.cellSpans, this.cellSpans)
       && other.colCount === this.colCount
-      && JSON.stringify(other.alignments) === JSON.stringify(this.alignments)
+      && sameStringArray(other.alignments, this.alignments)
       && other.kind === this.kind
       && other.lineFrom === this.lineFrom
       && other.lineTo === this.lineTo
@@ -817,13 +873,13 @@ class TableWidget extends WidgetType {
   }
 
   eq(other: TableWidget) {
-    return JSON.stringify(other.headerCells) === JSON.stringify(this.headerCells)
-      && JSON.stringify(other.bodyRows) === JSON.stringify(this.bodyRows)
-      && JSON.stringify(other.alignments) === JSON.stringify(this.alignments)
+    return sameStringArray(other.headerCells, this.headerCells)
+      && sameTableRows(other.bodyRows, this.bodyRows)
+      && sameStringArray(other.alignments, this.alignments)
       && other.hasHeader === this.hasHeader
       && other.sourceFrom === this.sourceFrom
       && other.sourceTo === this.sourceTo
-      && JSON.stringify(other.sourceLines) === JSON.stringify(this.sourceLines);
+      && sameTableSourceLines(other.sourceLines, this.sourceLines);
   }
 }
 
@@ -842,16 +898,117 @@ function cursorOnThisLine(state: EditorState, from: number, to: number): boolean
   return sel.from >= line.from && sel.to <= line.to;
 }
 
+type LivePreviewRange = { from: number; to: number };
+
+const LARGE_DOCUMENT_LINE_THRESHOLD = 900;
+const INITIAL_PREVIEW_LINES_BEFORE = 48;
+const INITIAL_PREVIEW_LINES_AFTER = 240;
+const VIEWPORT_PREVIEW_LINE_MARGIN = 120;
+
+function lineRangeToDocumentRange(state: EditorState, fromLine: number, toLine: number): LivePreviewRange {
+  const safeFromLine = Math.max(1, Math.min(state.doc.lines, fromLine));
+  const safeToLine = Math.max(safeFromLine, Math.min(state.doc.lines, toLine));
+  return {
+    from: state.doc.line(safeFromLine).from,
+    to: state.doc.line(safeToLine).to,
+  };
+}
+
+function expandRangeToTableBoundaries(state: EditorState, range: LivePreviewRange): LivePreviewRange {
+  let fromLine = state.doc.lineAt(Math.max(0, Math.min(state.doc.length, range.from))).number;
+  let toLine = state.doc.lineAt(Math.max(0, Math.min(state.doc.length, Math.max(range.from, range.to - 1)))).number;
+
+  if (splitTableRow(state.doc.line(fromLine).text)) {
+    while (fromLine > 1 && splitTableRow(state.doc.line(fromLine - 1).text)) fromLine -= 1;
+  }
+  if (splitTableRow(state.doc.line(toLine).text)) {
+    while (toLine < state.doc.lines && splitTableRow(state.doc.line(toLine + 1).text)) toLine += 1;
+  }
+
+  return lineRangeToDocumentRange(state, fromLine, toLine);
+}
+
+function mergeLivePreviewRanges(state: EditorState, ranges: LivePreviewRange[]): LivePreviewRange[] {
+  if (state.doc.length === 0) return [{ from: 0, to: 0 }];
+  const normalized = ranges
+    .map(range => expandRangeToTableBoundaries(state, range))
+    .sort((a, b) => a.from - b.from);
+  const merged: LivePreviewRange[] = [];
+
+  for (const range of normalized) {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.from > previous.to + 1) {
+      merged.push({ ...range });
+      continue;
+    }
+    previous.to = Math.max(previous.to, range.to);
+  }
+  return merged;
+}
+
+function getInitialLivePreviewRanges(state: EditorState): LivePreviewRange[] {
+  if (state.doc.lines <= LARGE_DOCUMENT_LINE_THRESHOLD) {
+    return [{ from: 0, to: state.doc.length }];
+  }
+  const selectionLine = state.doc.lineAt(state.selection.main.head).number;
+  return mergeLivePreviewRanges(state, [lineRangeToDocumentRange(
+    state,
+    selectionLine - INITIAL_PREVIEW_LINES_BEFORE,
+    selectionLine + INITIAL_PREVIEW_LINES_AFTER,
+  )]);
+}
+
+function isRangeCovered(ranges: LivePreviewRange[], target: LivePreviewRange): boolean {
+  return ranges.some(range => range.from <= target.from && range.to >= target.to);
+}
+
 /* ═══════════════════════════════════════════════════════
    Build Decorations from the syntax tree
    ═══════════════════════════════════════════════════════ */
 
-function buildDecorations(state: EditorState): DecorationSet {
+function buildDecorations(state: EditorState, requestedRanges = getInitialLivePreviewRanges(state)): DecorationSet {
+  const buildStartedAt = typeof performance !== 'undefined' ? performance.now() : 0;
   const decs: Range<Decoration>[] = [];
   const tree = syntaxTree(state);
   const doc = state.doc;
   const renderAll = state.facet(EditorState.readOnly);
+  const scanRanges = mergeLivePreviewRanges(state, requestedRanges);
+  const scanLineRanges = scanRanges.map(range => ({
+    fromLine: doc.lineAt(range.from).number,
+    toLine: doc.lineAt(Math.max(range.from, range.to - 1)).number,
+  }));
   const parents: { name: string; from: number; to: number }[] = [];
+  const renderedTableLines = new Set<number>();
+
+  if (!renderAll) {
+    for (const scanLineRange of scanLineRanges) {
+      let lineNumber = scanLineRange.fromLine;
+      while (lineNumber <= scanLineRange.toLine) {
+      const firstLine = doc.line(lineNumber);
+      if (!splitTableRow(firstLine.text)) {
+        lineNumber += 1;
+        continue;
+      }
+
+      const blockLineNumbers: number[] = [];
+      let hasSeparator = false;
+      while (lineNumber <= scanLineRange.toLine) {
+        const line = doc.line(lineNumber);
+        if (!splitTableRow(line.text)) break;
+        blockLineNumbers.push(lineNumber);
+        hasSeparator ||= isTableSeparatorRow(line.text);
+        lineNumber += 1;
+      }
+
+      if (blockLineNumbers.length < 2 || !hasSeparator) continue;
+      const sourceFrom = doc.line(blockLineNumbers[0]).from;
+      const sourceTo = doc.line(blockLineNumbers[blockLineNumbers.length - 1]).to;
+      if (!cursorNearRange(state, sourceFrom, sourceTo, 0)) {
+        blockLineNumbers.forEach(value => renderedTableLines.add(value));
+      }
+      }
+    }
+  }
 
   const addEditableTableRows = (
     blockLines: Array<{ ln: number; text: string; isSep: boolean }>,
@@ -898,10 +1055,15 @@ function buildDecorations(state: EditorState): DecorationSet {
     });
   };
 
-  tree.iterate({
+  for (const scanRange of scanRanges) {
+    parents.length = 0;
+    tree.iterate({
+    from: scanRange.from,
+    to: scanRange.to,
     enter(node) {
       const parent = parents.length > 0 ? parents[parents.length - 1] : null;
       const { from, to, name } = node;
+      if (renderedTableLines.has(doc.lineAt(from).number)) return false;
 
       switch (name) {
 
@@ -1172,15 +1334,18 @@ function buildDecorations(state: EditorState): DecorationSet {
     leave() {
       parents.pop();
     }
-  });
+    });
+  }
 
   /* ── Wiki-links: detect via regex ── */
-  const fullText = doc.toString();
-  const wikiRegex = /\[\[([^\]]+)\]\]/g;
-  let wikiMatch;
-  while ((wikiMatch = wikiRegex.exec(fullText)) !== null) {
-    const start = wikiMatch.index;
+  for (const scanRange of scanRanges) {
+    const rangeText = doc.sliceString(scanRange.from, scanRange.to);
+    const wikiRegex = /\[\[([^\]]+)\]\]/g;
+    let wikiMatch;
+    while ((wikiMatch = wikiRegex.exec(rangeText)) !== null) {
+    const start = scanRange.from + wikiMatch.index;
     const end = start + wikiMatch[0].length;
+    if (renderedTableLines.has(doc.lineAt(start).number)) continue;
     if (renderAll || !cursorNearRange(state, start, end)) {
       decs.push(Decoration.replace({}).range(start, start + 2));
       decs.push(Decoration.replace({}).range(end - 2, end));
@@ -1191,6 +1356,7 @@ function buildDecorations(state: EditorState): DecorationSet {
         }).range(start + 2, end - 2));
       }
     }
+    }
   }
 
   /* ── Tables ── */
@@ -1199,15 +1365,18 @@ function buildDecorations(state: EditorState): DecorationSet {
      preview can still render the full table widget. */
 
   /* Safe inline color spans inserted by the editing toolbar. */
-  const colorSpanRegex = /<span\s+style=(["'])([\s\S]*?)\1\s*>([\s\S]*?)<\/span>/gi;
-  let colorSpanMatch;
-  while ((colorSpanMatch = colorSpanRegex.exec(fullText)) !== null) {
+  for (const scanRange of scanRanges) {
+    const rangeText = doc.sliceString(scanRange.from, scanRange.to);
+    const colorSpanRegex = /<span\s+style=(["'])([\s\S]*?)\1\s*>([\s\S]*?)<\/span>/gi;
+    let colorSpanMatch;
+    while ((colorSpanMatch = colorSpanRegex.exec(rangeText)) !== null) {
     const fullMatch = colorSpanMatch[0];
     const safeStyle = sanitizeSpanStyle(colorSpanMatch[2]);
     if (!safeStyle) continue;
 
-    const start = colorSpanMatch.index;
+    const start = scanRange.from + colorSpanMatch.index;
     const end = start + fullMatch.length;
+    if (renderedTableLines.has(doc.lineAt(start).number)) continue;
     if (!renderAll && cursorNearRange(state, start, end)) continue;
 
     const openTag = fullMatch.match(/^<span\s+style=(["'])([\s\S]*?)\1\s*>/i)?.[0];
@@ -1224,11 +1393,12 @@ function buildDecorations(state: EditorState): DecorationSet {
       class: 'cm-lp-color-span',
       attributes: { style: safeStyle }
     }).range(innerFrom, innerTo));
+    }
   }
 
-  const lineCount = doc.lines;
-  let ti = 1;
-  while (ti <= lineCount) {
+  for (const scanLineRange of scanLineRanges) {
+  let ti = scanLineRange.fromLine;
+  while (ti <= scanLineRange.toLine) {
     const tLine = doc.line(ti);
     const tText = tLine.text;
     const repairedCompressedTable = repairCompressedMarkdownTable(tText);
@@ -1280,7 +1450,7 @@ function buildDecorations(state: EditorState): DecorationSet {
 
     /* Collect contiguous table rows */
     const blockLines: { ln: number; text: string; isSep: boolean }[] = [];
-    while (ti <= lineCount) {
+    while (ti <= scanLineRange.toLine) {
       const bl = doc.line(ti);
       if (!splitTableRow(bl.text)) break;
       blockLines.push({ ln: ti, text: bl.text, isSep: isTableSeparatorRow(bl.text) });
@@ -1335,6 +1505,7 @@ function buildDecorations(state: EditorState): DecorationSet {
       block: true,
     }).range(sourceFrom, sourceTo));
   }
+  }
 
   /* Sort and build DecorationSet — only filter cross-line replace decorations.
      Mark decorations can safely span lines; only plain replace causes CM6 errors. */
@@ -1348,21 +1519,180 @@ function buildDecorations(state: EditorState): DecorationSet {
       return Boolean(d.value.spec.block);
     } catch { return false; }
   });
-  return Decoration.set(safeDecs, true);
+  const decorationSet = Decoration.set(safeDecs, true);
+  if (buildStartedAt > 0 && typeof performance !== 'undefined') {
+    const buildFinishedAt = performance.now();
+    if (buildFinishedAt - buildStartedAt >= 8) {
+      try {
+        performance.measure('ars-note:live-preview-decorations', {
+          start: buildStartedAt,
+          end: buildFinishedAt,
+          detail: {
+            documentLength: doc.length,
+            decorationCount: safeDecs.length,
+            renderedCharacters: scanRanges.reduce((total, range) => total + range.to - range.from, 0),
+          },
+        });
+      } catch { /* Performance diagnostics are optional. */ }
+    }
+  }
+  return decorationSet;
 }
 
 /* ═══════════════════════════════════════════════════════
    ViewPlugin — recomputes decorations on every change
    ═══════════════════════════════════════════════════════ */
 
-const livePreviewDecorations = StateField.define<DecorationSet>({
+type LivePreviewDecorationState = {
+  decorations: DecorationSet;
+  ranges: LivePreviewRange[];
+};
+
+const extendLivePreviewRanges = StateEffect.define<LivePreviewRange[]>();
+
+function replaceDecorationsInRanges(
+  state: EditorState,
+  current: DecorationSet,
+  requestedRanges: LivePreviewRange[],
+): DecorationSet {
+  const ranges = mergeLivePreviewRanges(state, requestedRanges);
+  const replacement = buildDecorations(state, ranges);
+  const additions: Range<Decoration>[] = [];
+  replacement.between(0, state.doc.length, (from, to, value) => {
+    additions.push(value.range(from, to));
+  });
+  return current.update({
+    filter: (from, to) => !ranges.some(range => (
+      from === to
+        ? from >= range.from && from <= range.to
+        : from <= range.to && to >= range.from
+    )),
+    add: additions,
+    sort: true,
+  });
+}
+
+function getSelectionRefreshRange(state: EditorState): LivePreviewRange {
+  const selection = state.selection.main;
+  const fromLine = state.doc.lineAt(selection.from).number;
+  const toLine = state.doc.lineAt(selection.to).number;
+  return lineRangeToDocumentRange(state, fromLine - 1, toLine + 1);
+}
+
+const livePreviewDecorations = StateField.define<LivePreviewDecorationState>({
   create(state) {
-    return buildDecorations(state);
+    const ranges = getInitialLivePreviewRanges(state);
+    return { decorations: buildDecorations(state, ranges), ranges };
   },
-  update(_value, tr) {
-    return buildDecorations(tr.state);
+  update(value, tr) {
+    const requestedRanges = tr.effects
+      .filter(effect => effect.is(extendLivePreviewRanges))
+      .flatMap(effect => effect.value);
+
+    if (tr.docChanged) {
+      const coveredTo = value.ranges.reduce((maximum, range) => Math.max(maximum, range.to), 0);
+      let changesOnlyAfterRenderedContent = true;
+      let insertedCharacters = 0;
+      tr.changes.iterChanges((fromA, _toA, fromB, toB) => {
+        if (fromA < coveredTo) changesOnlyAfterRenderedContent = false;
+        insertedCharacters += toB - fromB;
+      });
+      if (changesOnlyAfterRenderedContent && insertedCharacters >= 1_000) {
+        return {
+          decorations: value.decorations.map(tr.changes),
+          ranges: value.ranges,
+        };
+      }
+      const ranges = getInitialLivePreviewRanges(tr.state);
+      return { decorations: buildDecorations(tr.state, ranges), ranges };
+    }
+
+    if (requestedRanges.length > 0) {
+      const ranges = mergeLivePreviewRanges(tr.state, [...value.ranges, ...requestedRanges]);
+      if (ranges.length === value.ranges.length
+        && ranges.every((range, index) => (
+          range.from === value.ranges[index]?.from && range.to === value.ranges[index]?.to
+        ))) {
+        return value;
+      }
+      return {
+        decorations: replaceDecorationsInRanges(tr.state, value.decorations, requestedRanges),
+        ranges,
+      };
+    }
+
+    if (!tr.docChanged) {
+      if (tr.startState.selection.eq(tr.state.selection)) return value;
+
+      /* Cursor movement only changes preview decorations on Markdown-bearing
+         lines. Keeping the existing set for plain prose avoids an O(document)
+         rebuild whenever the user clicks or moves through a large note. */
+      const selectionTouchesPreviewSyntax = (state: EditorState): boolean => {
+        const selection = state.selection.main;
+        const firstLine = state.doc.lineAt(selection.from);
+        const lastLine = state.doc.lineAt(selection.to);
+        if (lastLine.number - firstLine.number > 12) return true;
+        for (let lineNumber = firstLine.number; lineNumber <= lastLine.number; lineNumber += 1) {
+          const text = state.doc.line(lineNumber).text;
+          if (/[*_~`\[\]<>|]/.test(text)) return true;
+          if (/^\s*(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|```)/.test(text)) return true;
+        }
+        return false;
+      };
+
+      if (!selectionTouchesPreviewSyntax(tr.startState) && !selectionTouchesPreviewSyntax(tr.state)) {
+        return value;
+      }
+    }
+    const refreshRanges = [
+      getSelectionRefreshRange(tr.startState),
+      getSelectionRefreshRange(tr.state),
+    ];
+    return {
+      decorations: replaceDecorationsInRanges(tr.state, value.decorations, refreshRanges),
+      ranges: mergeLivePreviewRanges(tr.state, [...value.ranges, ...refreshRanges]),
+    };
   },
-  provide: field => EditorView.decorations.from(field),
+  provide: field => EditorView.decorations.from(field, value => value.decorations),
+});
+
+const livePreviewViewportLoader = ViewPlugin.fromClass(class {
+  private frame = 0;
+
+  constructor(view: EditorView) {
+    this.schedule(view);
+  }
+
+  update(update: { view: EditorView; viewportChanged: boolean; geometryChanged: boolean }) {
+    if (update.viewportChanged || update.geometryChanged) this.schedule(update.view);
+  }
+
+  private schedule(view: EditorView) {
+    if (view.state.doc.lines <= LARGE_DOCUMENT_LINE_THRESHOLD || this.frame) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = 0;
+      if (!view.dom.isConnected) return;
+      const field = view.state.field(livePreviewDecorations, false);
+      if (!field) return;
+
+      const visibleRanges = view.visibleRanges.map(range => {
+        const fromLine = view.state.doc.lineAt(range.from).number;
+        const toLine = view.state.doc.lineAt(Math.max(range.from, range.to - 1)).number;
+        return lineRangeToDocumentRange(
+          view.state,
+          fromLine - VIEWPORT_PREVIEW_LINE_MARGIN,
+          toLine + VIEWPORT_PREVIEW_LINE_MARGIN,
+        );
+      });
+      const missingRanges = visibleRanges.filter(range => !isRangeCovered(field.ranges, range));
+      if (missingRanges.length === 0) return;
+      view.dispatch({ effects: extendLivePreviewRanges.of(missingRanges) });
+    });
+  }
+
+  destroy() {
+    if (this.frame) cancelAnimationFrame(this.frame);
+  }
 });
 
 /* ═══════════════════════════════════════════════════════
@@ -1409,6 +1739,7 @@ export function slashCommandSource(context: CompletionContext): CompletionResult
 export function createLivePreviewExtension(): Extension[] {
   return [
     livePreviewDecorations,
+    livePreviewViewportLoader,
 
     /* Theme for widget elements (images, checkboxes, etc.) */
     EditorView.baseTheme({
@@ -1567,7 +1898,7 @@ export function createLivePreviewExtension(): Extension[] {
         color: '#aac7ff',
       },
 
-      /* ── Table styles (Obsidian-inspired) ── */
+      /* Table styles for Ars-note Live Preview. */
       '.cm-lp-table-wrap': {
         display: 'block',
         position: 'relative',

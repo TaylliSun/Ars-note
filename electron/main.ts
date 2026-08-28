@@ -14,9 +14,23 @@ import {
   buildAITaskPolicy as buildAITaskContract,
   evaluateAIToolCall,
   isAIToolMutationName,
+  type AITaskPolicy,
 } from './aiTaskPolicy';
 import { AIRequestRegistry } from './aiRequestRegistry';
-import { clearAIVaultScanCache, scanAndIndexVault, type VaultFileEntry } from './aiVaultScanner';
+import { shouldRetryAIRequestWithoutTools } from './aiProviderCompatibility';
+import { autoHumanizeMarkdownContent } from './humanizedWriting';
+import { buildDesignQualityReport } from './designWritingQuality';
+import { clearAIVaultScanCache, scanAndIndexVault } from './aiVaultScanner';
+import { invalidateVaultFileTreeCache, readVaultFileTree } from './vaultFileTree';
+import { scanVaultIndex } from './vaultIndex';
+import {
+  analyzeDesignChange,
+  buildDesignCanonPromptContext,
+  DESIGN_CANON_REGISTRY_PATH,
+  readDesignCanonRegistry,
+  setCanonicalDesignDocument,
+  suggestCanonicalDocuments,
+} from './designGovernance';
 import { AI_RUNTIME_CONTEXT_TOKEN_LIMIT, fitAIContextWindow, type AIContextWindowUsage } from './aiContextWindow';
 import { extractAIUserIntentText, retrieveRelevantVaultContext } from './aiVaultRetriever';
 import {
@@ -63,7 +77,7 @@ const DOWNLOADS_DIR = 'downloads';
 const VAULT_CONFIG_FILE = 'vault.json';
 const SETTINGS_FILE = 'settings.json';
 const APP_VERSION = (() => {
-  try { return app.getVersion() || '1.5.69'; } catch { return '1.5.69'; }
+  try { return app.getVersion() || '1.5.97'; } catch { return '1.5.97'; }
 })();
 const LIVE_SYNC_CONFIG_FILE = path.join(app.getPath('userData'), 'live-sync-configs.json');
 const AI_RUNTIME_CONFIG_FILE = path.join(app.getPath('userData'), 'ai-runtime-configs.json');
@@ -2195,7 +2209,7 @@ function buildTeamTaskWorkDoc(task: any, relativePath: string): string {
   lines.push(`acceptance: ${JSON.stringify(acceptance)}`);
   lines.push(`schedule: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${TEAM_SCHEDULE_FILE}`)}`);
   lines.push(`teamDashboard: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/team-dashboard.md`)}`);
-  lines.push(`obsidianCommandCenter: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName()}`)}`);
+  lines.push(`teamCommandCenter: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName()}`)}`);
   lines.push(`aiHandoff: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/ai-handoff.md`)}`);
   lines.push(`linkHealth: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${teamLinkHealthFileName()}`)}`);
   lines.push(`generatedAt: ${JSON.stringify(new Date().toISOString())}`);
@@ -2212,9 +2226,9 @@ function buildTeamTaskWorkDoc(task: any, relativePath: string): string {
   lines.push('');
   lines.push(`> Generated from the team schedule. Vault path: \`${relativePath}\`.`);
   lines.push('');
-  lines.push('## Obsidian Workflow');
+  lines.push('## Ars-note Workflow');
   lines.push(`- Team dashboard: [[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`);
-  lines.push(`- Obsidian command center: [[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Team command center: [[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- AI handoff: [[${TEAM_SCHEDULE_DIR}/ai-handoff|ai-handoff]]`);
   lines.push(`- Link health: [[${TEAM_SCHEDULE_DIR}/${teamLinkHealthFileName().replace(/\.md$/i, '')}|${teamLinkHealthFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- Daily workpack: [[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
@@ -2313,7 +2327,7 @@ function buildTeamTaskWorkDocMetadata(task: any, relativePath: string): {
       schedule: `${TEAM_SCHEDULE_DIR}/${TEAM_SCHEDULE_FILE}`,
       teamDashboard: `${TEAM_SCHEDULE_DIR}/team-dashboard.md`,
       aiHandoff: `${TEAM_SCHEDULE_DIR}/ai-handoff.md`,
-      obsidianCommandCenter: `${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName()}`,
+      teamCommandCenter: `${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName()}`,
       linkHealth: `${TEAM_SCHEDULE_DIR}/${teamLinkHealthFileName()}`,
       generatedAt: new Date().toISOString(),
     },
@@ -2393,11 +2407,24 @@ function upgradeTeamTaskWorkDocContent(content: string, task: any, relativePath:
   const owner = normalizeTeamScheduleText(task?.owner) || 'Unassigned';
   const sections: string[] = [];
 
-  if (!sectionExists('Obsidian Workflow')) {
+  const hasGeneratedWorkflowLinks = body.includes(`- Team dashboard: [[${TEAM_SCHEDULE_DIR}/team-dashboard`)
+    && body.includes(`- Team command center: [[${TEAM_SCHEDULE_DIR}/`);
+  if (!sectionExists('Ars-note Workflow') && hasGeneratedWorkflowLinks) {
+    const migratedBody = body.replace(
+      /(^|\n)(#{1,6}\s+)[^\n]*Workflow(?=\s*(?:\n|$))/i,
+      '$1$2Ars-note Workflow',
+    );
+    if (migratedBody !== body) {
+      body = migratedBody;
+      changed = true;
+    }
+  }
+
+  if (!sectionExists('Ars-note Workflow')) {
     sections.push([
-      '## Obsidian Workflow',
+      '## Ars-note Workflow',
       `- Team dashboard: [[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`,
-      `- Obsidian command center: [[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`,
+      `- Team command center: [[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`,
       `- AI handoff: [[${TEAM_SCHEDULE_DIR}/ai-handoff|ai-handoff]]`,
       `- Link health: [[${TEAM_SCHEDULE_DIR}/${teamLinkHealthFileName().replace(/\.md$/i, '')}|${teamLinkHealthFileName().replace(/\.md$/i, '')}]]`,
       `- Daily workpack: [[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`,
@@ -2618,8 +2645,58 @@ function teamAITakeoverPlanFileName(date = teamTodayString()): string {
   return `ai-takeover-plan-${date.replace(/-/g, '')}.md`;
 }
 
-function teamObsidianCommandCenterFileName(): string {
-  return 'obsidian-command-center.md';
+function teamCommandCenterFileName(): string {
+  return 'team-command-center.md';
+}
+
+function isSupersededTeamCommandCenter(fileName: string, content: string): boolean {
+  if (/(?:^|[-_])command[-_]center\.md$/i.test(fileName)) return true;
+  if (/^type:\s*ars-team-command-center\s*$/mi.test(content)) return true;
+  return /^#\s+.*(?:团队控制台|Team Command Center)\s*$/mi.test(content)
+    && content.includes(`${TEAM_SCHEDULE_DIR}/team-dashboard`)
+    && content.includes(`${TEAM_SCHEDULE_DIR}/ai-handoff`);
+}
+
+function archiveSupersededTeamCommandCenters(vaultPath: string): string[] {
+  const teamDir = path.join(path.resolve(vaultPath), TEAM_SCHEDULE_DIR);
+  const canonicalPath = path.join(teamDir, teamCommandCenterFileName());
+  if (!fs.existsSync(teamDir) || !fs.existsSync(canonicalPath)) return [];
+
+  try {
+    const canonicalContent = fs.readFileSync(canonicalPath, 'utf8');
+    const candidates = fs.readdirSync(teamDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.md$/i.test(entry.name) && entry.name.toLowerCase() !== teamCommandCenterFileName())
+      .map((entry) => ({
+        name: entry.name,
+        fullPath: path.join(teamDir, entry.name),
+      }));
+    const archivedPaths: string[] = [];
+
+    for (const candidate of candidates) {
+      const candidateContent = fs.readFileSync(candidate.fullPath, 'utf8');
+      if (!isSupersededTeamCommandCenter(candidate.name, candidateContent)) continue;
+      if (candidateContent === canonicalContent) {
+        fs.unlinkSync(candidate.fullPath);
+        continue;
+      }
+
+      const archiveDir = path.join(teamDir, 'legacy');
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const baseName = 'team-command-center-pre-migration';
+      let archivePath = path.join(archiveDir, `${baseName}.md`);
+      let suffix = 2;
+      while (fs.existsSync(archivePath)) {
+        archivePath = path.join(archiveDir, `${baseName}-${suffix}.md`);
+        suffix += 1;
+      }
+      fs.renameSync(candidate.fullPath, archivePath);
+      archivedPaths.push(path.relative(path.resolve(vaultPath), archivePath).replace(/\\/g, '/'));
+    }
+    return archivedPaths;
+  } catch (error) {
+    console.warn('[TeamWorkspace] Could not archive superseded command-center files:', error);
+    return [];
+  }
 }
 
 function teamDueWithinDays(dueDate: unknown, days: number, date = teamTodayString()): boolean {
@@ -3649,7 +3726,11 @@ function buildTeamWorkspaceBootstrapTasks(vaultPath: string, options: { currentM
   const limit = Math.max(8, Math.min(80, Math.floor(Number(options.limit) || 48)));
   const owner = normalizeTeamScheduleText(options.currentMember) || '未分配';
   const today = teamTodayString();
-  const commandCenterReady = fs.existsSync(path.join(path.resolve(vaultPath), TEAM_SCHEDULE_DIR, teamObsidianCommandCenterFileName()));
+  const commandCenterReady = fs.existsSync(path.join(
+    path.resolve(vaultPath),
+    TEAM_SCHEDULE_DIR,
+    teamCommandCenterFileName(),
+  ));
   const tasks: any[] = [];
   const seen = new Set<string>();
 
@@ -3687,7 +3768,7 @@ function buildTeamWorkspaceBootstrapTasks(vaultPath: string, options: { currentM
     dueDate: commandCenterReady ? today : teamDateOffset(today, 1),
     estimateMinutes: 60,
     linkedDoc: '07_Unity_Tasks/TeamProductionBootstrap.md',
-    deliverable: '生成并检查 .ars-team/obsidian-command-center.md、team-dashboard、production-health、成员页、今日工作包、工时表和 AI 交接入口。',
+    deliverable: '生成并检查 .ars-team/team-command-center.md、team-dashboard、production-health、成员页、今日工作包、工时表和 AI 交接入口。',
     acceptance: '团队成员能从控制台进入自己的任务页；AI 能从 ai-handoff、production-health 和 ai-memory-index 接管；任务文档能记录 Work Log 与验收记录。',
     notes: commandCenterReady
       ? '团队工作区初始化自动任务。已检测到 Ars-note 团队控制台文档，自动视为完成。'
@@ -3789,7 +3870,7 @@ function bootstrapTeamWorkspace(vaultPath: string, options: { currentMember?: st
   const upsert = upsertTeamScheduleTasks(resolvedVault, tasks, '团队工作区初始化');
   const productionDocs = generateTeamProductionDocs(resolvedVault, {
     includeDashboard: true,
-    includeObsidianCommandCenter: true,
+    includeTeamCommandCenter: true,
     includeProductionHealth: true,
     includeDependencyMap: true,
     includeHandoff: true,
@@ -5062,7 +5143,7 @@ function buildTeamProductionHealthPage(vaultPath: string, schedule: any, health:
   lines.push(`> 每天开工前先看这页。它把任务风险、成员负载、QA、叙事链路和工时记录合成一个“今天先处理什么”的判断页。源文件：\`${TEAM_SCHEDULE_DIR}/${TEAM_SCHEDULE_FILE}\`。`);
   lines.push('');
   lines.push('## 入口');
-  lines.push(`- Obsidian 控制台：[[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Ars-note 制作台：[[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 团队首页：[[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`);
   lines.push(`- 今日工作包：[[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
   lines.push(`- 阻塞交接：[[${TEAM_SCHEDULE_DIR}/handoffs/blocker-handoff-${dateKey}|blocker-handoff-${dateKey}]]`);
@@ -5835,7 +5916,7 @@ function buildTeamMemberTaskPage(vaultPath: string, schedule: any, member: strin
   lines.push('> 自动从团队时间表生成。用途：成员每天打开这一页，先看优先级和风险，再进入对应任务文档开工，结束前记录实际用时。');
   lines.push('');
   lines.push('## 入口');
-  lines.push(`- Obsidian 控制台：[[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Ars-note 制作台：[[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 今日团队工作包：[[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
   lines.push(`- 团队首页：[[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`);
   lines.push(`- 里程碑路线图：[[${TEAM_SCHEDULE_DIR}/roadmaps/${teamMilestoneRoadmapFileName(date).replace(/\.md$/i, '')}|${teamMilestoneRoadmapFileName(date).replace(/\.md$/i, '')}]]`);
@@ -6145,7 +6226,7 @@ function buildTeamDailyStandupPage(vaultPath: string, schedule: any, health: any
   lines.push('## 今日入口');
   lines.push(`- 今日工作包：[[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
   lines.push(`- 团队首页：[[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`);
-  lines.push(`- Obsidian 控制台：[[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Ars-note 制作台：[[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 工时表：[[${TEAM_SCHEDULE_DIR}/timesheets/timesheet-${dateKey}|timesheet-${dateKey}]]`);
   lines.push(`- 生产健康：[[${TEAM_SCHEDULE_DIR}/${teamProductionHealthFileName().replace(/\.md$/i, '')}|${teamProductionHealthFileName().replace(/\.md$/i, '')}]]`);
   lines.push('');
@@ -7091,7 +7172,7 @@ function buildTeamDashboardPage(vaultPath: string, schedule: any, health: any, d
   lines.push('> 团队每天的 Ars-note 入口：制作人看风险和交接，成员点自己的任务页开工，AI 接管时从这里和 ai-handoff 继续。');
   lines.push('');
   lines.push('## 今日入口');
-  lines.push(`- Obsidian 控制台：[[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Ars-note 制作台：[[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 生产健康报告：[[${TEAM_SCHEDULE_DIR}/${teamProductionHealthFileName().replace(/\.md$/i, '')}|${teamProductionHealthFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 今日工作包：[[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
   lines.push(`- AI 交接简报：[[${TEAM_SCHEDULE_DIR}/ai-handoff|ai-handoff]]`);
@@ -7182,7 +7263,7 @@ function buildTeamDashboardPage(vaultPath: string, schedule: any, health: any, d
   return lines.join('\n');
 }
 
-function buildTeamObsidianCommandCenterPage(vaultPath: string, schedule: any, health: any, date = teamTodayString()): string {
+function buildTeamCommandCenterPage(vaultPath: string, schedule: any, health: any, date = teamTodayString()): string {
   const members = teamScheduleMembers(schedule);
   const memberLoad = Array.isArray(health?.memberLoad) ? health.memberLoad : buildTeamMemberLoadRows(vaultPath, schedule, date);
   const activeTasks = teamReportTaskSort((Array.isArray(schedule.tasks) ? schedule.tasks : [])
@@ -7201,11 +7282,11 @@ function buildTeamObsidianCommandCenterPage(vaultPath: string, schedule: any, he
   const recommendations = Array.isArray(health?.recommendations) ? health.recommendations : [];
   const narrative = health?.narrative || scanNarrativeProductionChain(vaultPath, 16);
   const qaItems = Array.isArray(health?.qaItems) ? health.qaItems : [];
-  const commandCenterName = teamObsidianCommandCenterFileName();
+  const commandCenterName = teamCommandCenterFileName();
   const lines: string[] = [];
 
   lines.push('---');
-  lines.push('type: ars-team-obsidian-command-center');
+  lines.push('type: ars-team-command-center');
   lines.push(`date: ${JSON.stringify(date)}`);
   lines.push(`weekStart: ${JSON.stringify(weekStart)}`);
   lines.push(`weekEnd: ${JSON.stringify(weekEnd)}`);
@@ -7218,7 +7299,7 @@ function buildTeamObsidianCommandCenterPage(vaultPath: string, schedule: any, he
   lines.push(`linkHealth: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${teamLinkHealthFileName()}`)}`);
   lines.push(`aiMemoryIndex: ${JSON.stringify(`${TEAM_SCHEDULE_DIR}/${teamAiMemoryIndexFileName()}`)}`);
   lines.push('tags:');
-  lines.push('  - obsidian-command-center');
+  lines.push('  - ars-team-command-center');
   lines.push('  - team-production');
   lines.push('  - game-dev');
   lines.push('  - ai-takeover');
@@ -7229,7 +7310,7 @@ function buildTeamObsidianCommandCenterPage(vaultPath: string, schedule: any, he
   lines.push(`> 团队打开 Ars-note Vault 后先看这一页。它把任务、工时、叙事流程、链接健康、AI 记忆和成员入口串成一个 Ars-note 工作台。源文件：\`${TEAM_SCHEDULE_DIR}/${TEAM_SCHEDULE_FILE}\`。`);
   lines.push('');
   lines.push('## 开工入口');
-  lines.push(`- 控制台：[[${TEAM_SCHEDULE_DIR}/${commandCenterName.replace(/\.md$/i, '')}|obsidian-command-center]]`);
+  lines.push(`- 制作台：[[${TEAM_SCHEDULE_DIR}/${commandCenterName.replace(/\.md$/i, '')}|team-command-center]]`);
   lines.push(`- 团队首页：[[${TEAM_SCHEDULE_DIR}/team-dashboard|team-dashboard]]`);
   lines.push(`- 今日工作包：[[${TEAM_SCHEDULE_DIR}/workpacks/daily-workpack-${dateKey}|daily-workpack-${dateKey}]]`);
   lines.push(`- AI 接管计划：[[${TEAM_SCHEDULE_DIR}/plans/${teamAITakeoverPlanFileName(date).replace(/\.md$/i, '')}|${teamAITakeoverPlanFileName(date).replace(/\.md$/i, '')}]]`);
@@ -7401,7 +7482,7 @@ function buildTeamAITakeoverPlanPage(vaultPath: string, schedule: any, health: a
   lines.push('> 这是给 AI 或制作人当天接管团队制作流程用的执行剧本。按顺序读、分派、推进、记录、刷新，避免只聊想法不落任务。');
   lines.push('');
   lines.push('## 入口');
-  lines.push(`- Obsidian 控制台：[[${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}|${teamObsidianCommandCenterFileName().replace(/\.md$/i, '')}]]`);
+  lines.push(`- Ars-note 制作台：[[${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName().replace(/\.md$/i, '')}|${teamCommandCenterFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- 制作健康报告：[[${TEAM_SCHEDULE_DIR}/${teamProductionHealthFileName().replace(/\.md$/i, '')}|${teamProductionHealthFileName().replace(/\.md$/i, '')}]]`);
   lines.push(`- AI 交接简报：[[${TEAM_SCHEDULE_DIR}/ai-handoff|ai-handoff]]`);
   lines.push(`- 叙事导演台：[[${TEAM_SCHEDULE_DIR}/narrative-director|narrative-director]]`);
@@ -7516,11 +7597,11 @@ function buildTeamAITakeoverPlanPage(vaultPath: string, schedule: any, health: a
   return lines.join('\n');
 }
 
-function generateTeamProductionDocs(vaultPath: string, options: { includeDashboard?: boolean; includeObsidianCommandCenter?: boolean; includeProductionHealth?: boolean; includeDependencyMap?: boolean; includeHandoff?: boolean; includeAiMemoryIndex?: boolean; includeLinkHealth?: boolean; includeBlockerHandoff?: boolean; includeReviewQueue?: boolean; includeWorkpack?: boolean; includeDailyStandup?: boolean; includeTimesheet?: boolean; includeRoadmap?: boolean; includeDecisionLog?: boolean; includeChangeImpact?: boolean; includeNarrativeDirector?: boolean; includeSprintPlan?: boolean; includeMemberPages?: boolean; includeTaskDocs?: boolean; includeTakeoverPlan?: boolean } = {}): { paths: string[]; summary: any } {
+function generateTeamProductionDocs(vaultPath: string, options: { includeDashboard?: boolean; includeTeamCommandCenter?: boolean; includeProductionHealth?: boolean; includeDependencyMap?: boolean; includeHandoff?: boolean; includeAiMemoryIndex?: boolean; includeLinkHealth?: boolean; includeBlockerHandoff?: boolean; includeReviewQueue?: boolean; includeWorkpack?: boolean; includeDailyStandup?: boolean; includeTimesheet?: boolean; includeRoadmap?: boolean; includeDecisionLog?: boolean; includeChangeImpact?: boolean; includeNarrativeDirector?: boolean; includeSprintPlan?: boolean; includeMemberPages?: boolean; includeTaskDocs?: boolean; includeTakeoverPlan?: boolean } = {}): { paths: string[]; summary: any } {
   const resolvedVault = path.resolve(vaultPath);
   const hasExplicitOptions = Object.keys(options || {}).length > 0;
   const includeDashboard = options.includeDashboard !== false;
-  const includeObsidianCommandCenter = options.includeObsidianCommandCenter !== false;
+  const includeTeamCommandCenter = options.includeTeamCommandCenter !== false;
   const includeProductionHealth = options.includeProductionHealth !== false;
   const includeDependencyMap = options.includeDependencyMap !== false;
   const includeHandoff = options.includeHandoff !== false;
@@ -7638,10 +7719,10 @@ function generateTeamProductionDocs(vaultPath: string, options: { includeDashboa
       });
     }
   }
-  if (includeObsidianCommandCenter) writes.push({
-    relPath: `${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName()}`,
-    content: buildTeamObsidianCommandCenterPage(resolvedVault, schedule, health, date),
-    reason: 'ai-team-obsidian-command-center',
+  if (includeTeamCommandCenter) writes.push({
+    relPath: `${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName()}`,
+    content: buildTeamCommandCenterPage(resolvedVault, schedule, health, date),
+    reason: 'ai-team-command-center',
   });
   if (includeDashboard) writes.push({
     relPath: `${TEAM_SCHEDULE_DIR}/team-dashboard.md`,
@@ -7658,6 +7739,10 @@ function generateTeamProductionDocs(vaultPath: string, options: { includeDashboa
     fs.writeFileSync(fullPath, item.content, 'utf-8');
     paths.push(item.relPath);
   }
+  const supersededCommandCenterArchives = includeTeamCommandCenter
+    ? archiveSupersededTeamCommandCenters(resolvedVault)
+    : [];
+  paths.push(...supersededCommandCenterArchives);
 
   return {
     paths,
@@ -7667,6 +7752,7 @@ function generateTeamProductionDocs(vaultPath: string, options: { includeDashboa
       stats: health.stats || summarizeTeamSchedule(schedule),
       recommendations: (health.recommendations || []).slice(0, 8),
       taskDocs,
+      supersededCommandCenterArchives,
     },
   };
 }
@@ -7742,7 +7828,7 @@ ipcMain.handle('team:syncTaskDocs', async (_e, vaultPath: string, fallbackMember
 
 ipcMain.handle('team:generateProductionDocs', async (_e, vaultPath: string, options?: {
   includeDashboard?: boolean;
-  includeObsidianCommandCenter?: boolean;
+  includeTeamCommandCenter?: boolean;
   includeProductionHealth?: boolean;
   includeDependencyMap?: boolean;
   includeHandoff?: boolean;
@@ -8295,42 +8381,16 @@ ipcMain.handle('vault:recentExists', async (_e, vp: string) => {
 });
 
 /* ── File Tree ── */
-ipcMain.handle('fs:readFileTree', async (_e, vaultPath: string) => {
+ipcMain.handle('fs:readFileTree', async (_e, vaultPath: string, force = false) => {
   if (!vaultPath || !fs.existsSync(vaultPath)) return [];
-  function readDir(dir: string): any[] {
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      const result: any[] = [];
-      const sorted = entries.sort((a, b) => {
-        if (a.isDirectory() && !b.isDirectory()) return -1;
-        if (!a.isDirectory() && b.isDirectory()) return 1;
-        return a.name.localeCompare(b.name);
-      });
-      for (const entry of sorted) {
-        if (isConflictArtifactName(entry.name)) continue;
-        if (entry.name.startsWith('.')) continue;
-        if (SKIP_DIRS.has(entry.name)) continue;
-        const fullPath = path.join(dir, entry.name);
-        const node: any = {
-          name: entry.name,
-          path: fullPath,
-          isDir: entry.isDirectory(),
-          children: [],
-        };
-        if (entry.isDirectory()) node.children = readDir(fullPath);
-        result.push(node);
-      }
-      return result;
-    } catch { return []; }
-  }
-  return readDir(vaultPath);
+  return readVaultFileTree(vaultPath, SKIP_DIRS, isConflictArtifactName, force === true);
 });
 
 /* ── File read / write ── */
 ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
   try {
     if (!fs.existsSync(filePath)) return '';
-    return fs.readFileSync(filePath, 'utf-8');
+    return await fs.promises.readFile(filePath, 'utf-8');
   } catch { return ''; }
 });
 
@@ -8348,6 +8408,7 @@ ipcMain.handle('fs:saveImageToVault', async (_e, vaultPath: string, relPath: str
   const dir = path.dirname(full);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(full, Buffer.from(data));
+  invalidateVaultFileTreeCache(vaultPath);
   return full;
 });
 
@@ -8359,6 +8420,7 @@ ipcMain.handle('fs:createFile', async (_e, filePath: string, content?: string) =
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filePath, content ?? '', 'utf-8');
+  invalidateVaultFileTreeCache();
 });
 
 /* ── Create folder ── */
@@ -8368,6 +8430,7 @@ ipcMain.handle('fs:createFolder', async (_e, folderPath: string) => {
   if (nameErr) throw new Error(nameErr);
   if (fs.existsSync(folderPath)) throw new Error(`Folder already exists: ${base}`);
   fs.mkdirSync(folderPath, { recursive: true });
+  invalidateVaultFileTreeCache();
 });
 
 /* ── Delete item (with vault-safety checks) ── */
@@ -8396,6 +8459,7 @@ ipcMain.handle('fs:deleteItem', async (_e, itemPath: string, vaultPath: string) 
   } else {
     fs.unlinkSync(itemPath);
   }
+  invalidateVaultFileTreeCache(resolvedVault);
 });
 
 /* ── Rename ── */
@@ -8407,6 +8471,7 @@ ipcMain.handle('fs:renameItem', async (_e, oldPath: string, newName: string) => 
   if (oldPath === newPath) return newPath;
   if (fs.existsSync(newPath)) throw new Error(`"${newName}" already exists`);
   fs.renameSync(oldPath, newPath);
+  invalidateVaultFileTreeCache();
   return newPath;
 });
 
@@ -8417,6 +8482,7 @@ ipcMain.handle('fs:moveItem', async (_e, srcPath: string, destDir: string) => {
   if (srcPath === newPath) return newPath;
   if (fs.existsSync(newPath)) throw new Error(`"${baseName}" already exists in destination`);
   fs.renameSync(srcPath, newPath);
+  invalidateVaultFileTreeCache();
   return newPath;
 });
 
@@ -8461,117 +8527,8 @@ ipcMain.handle('search:files', async (_e, vaultPath: string, query: string) => {
 
 /* ── Vault Index: scan all .md files for tags and wiki-links ── */
 ipcMain.handle('vault:scanIndex', async (_e, vaultPath: string) => {
-  const notes: Record<string, any> = {};
-
-  function walk(dir: string): void {
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (isConflictArtifactName(entry.name)) continue;
-        if (entry.name.startsWith('.')) continue;
-        if (SKIP_DIRS.has(entry.name)) continue;
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(fullPath);
-        } else if (entry.name.endsWith('.md')) {
-          try {
-            const content = fs.readFileSync(fullPath, 'utf-8');
-            const relPath = path.relative(vaultPath, fullPath).replace(/\\/g, '/');
-            const lines = content.split('\n');
-
-            /* Extract title from first H1 */
-            let title = entry.name.replace(/\.md$/i, '');
-            for (const line of lines) {
-              const h1 = line.match(/^#\s+(.+)$/);
-              if (h1) { title = h1[1].trim(); break; }
-            }
-
-            /* Parse tags — skip headings, code blocks, inline code */
-            const tags = new Set<string>();
-            let inCodeBlock = false;
-            const tagRegex = /(?:^|\s)#([a-zA-Z0-9_\-\/]+)/g;
-
-            for (let i = 0; i < lines.length; i++) {
-              const line = lines[i];
-              if (line.trimStart().startsWith('```')) { inCodeBlock = !inCodeBlock; continue; }
-              if (inCodeBlock) continue;
-              if (/^\s{0,3}#{1,6}\s/.test(line)) continue;
-
-              /* Strip inline code */
-              const stripped = line.replace(/`[^`]*`/g, (m) => ' '.repeat(m.length));
-              tagRegex.lastIndex = 0;
-              let m: RegExpExecArray | null;
-              while ((m = tagRegex.exec(stripped)) !== null) {
-                if (m[1].length > 0) tags.add(m[1].toLowerCase());
-              }
-            }
-
-            /* Parse wiki-links — skip code blocks */
-            const wikiLinks = new Set<string>();
-            const wikiRegex = /\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]/g;
-            inCodeBlock = false;
-            for (const line of lines) {
-              if (line.trimStart().startsWith('```')) { inCodeBlock = !inCodeBlock; continue; }
-              if (inCodeBlock) continue;
-              const stripped = line.replace(/`[^`]*`/g, (m) => ' '.repeat(m.length));
-              wikiRegex.lastIndex = 0;
-              let wm: RegExpExecArray | null;
-              while ((wm = wikiRegex.exec(stripped)) !== null) {
-                let target = wm[1].trim();
-                /* Strip heading anchor */
-                const hashIdx = target.indexOf('#');
-                if (hashIdx > 0) target = target.substring(0, hashIdx).trim();
-                if (target.length > 0) wikiLinks.add(target);
-              }
-            }
-
-            /* Extract metadata from markdown lines (v0.9.2) */
-            const metadata: Record<string, string> = {};
-            const metaPatterns: [RegExp, string][] = [
-              [/^- \*\*Status\*\*:\s*(.+)$/mi, 'status'],
-              [/^- \*\*Priority\*\*:\s*(.+)$/mi, 'priority'],
-              [/^- \*\*Owner\*\*:\s*(.+)$/mi, 'owner'],
-              [/^- \*\*Assignee\*\*:\s*(.+)$/mi, 'owner'],
-              [/^- \*\*Updated\*\*:\s*(.+)$/mi, 'updatedAt'],
-              [/^- \*\*Updated\*\*：\s*(.+)$/m, 'updatedAt'],
-              [/^- \*\*Summary\*\*:\s*(.+)$/mi, 'summary'],
-              [/^Status:\s*(.+)$/mi, 'status'],
-              [/^Priority:\s*(.+)$/mi, 'priority'],
-              [/^Owner:\s*(.+)$/mi, 'owner'],
-              [/^Updated:\s*(.+)$/mi, 'updatedAt'],
-              [/^Summary:\s*(.+)$/mi, 'summary'],
-              [/^状态[：:]\s*(.+)$/m, 'status'],
-              [/^优先级[：:]\s*(.+)$/m, 'priority'],
-              [/^负责人[：:]\s*(.+)$/m, 'owner'],
-              [/^更新[：:]\s*(.+)$/m, 'updatedAt'],
-              [/^摘要[：:]\s*(.+)$/m, 'summary'],
-            ];
-            for (const line of lines) {
-              for (const [regex, key] of metaPatterns) {
-                const m = line.match(regex);
-                if (m && m[1] && !metadata[key]) {
-                  metadata[key] = m[1].trim();
-                }
-              }
-            }
-
-            notes[relPath] = {
-              filePath: fullPath,
-              relativePath: relPath,
-              fileName: entry.name,
-              title,
-              tags: [...tags],
-              wikiLinks: [...wikiLinks],
-              metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-            };
-          } catch { /* skip unreadable */ }
-        }
-      }
-    } catch { /* skip unreadable dirs */ }
-  }
-
-  try { walk(vaultPath); } catch { /* vault dir gone */ }
-  return { notes, updatedAt: new Date().toISOString() };
+  if (!vaultPath || !fs.existsSync(vaultPath)) return { notes: {}, updatedAt: new Date().toISOString() };
+  return scanVaultIndex(vaultPath);
 });
 
 
@@ -12339,6 +12296,13 @@ ipcMain.handle('ai:getRuntimeStatus', async (_e, vaultPath: string) => {
   };
 });
 
+ipcMain.handle('ai:auditDesignDocument', async (
+  _e,
+  filePath: string,
+  content: string,
+  options?: { totalCharacterCount?: number; sampled?: boolean },
+) => buildDesignQualityReport(filePath, content, options));
+
 ipcMain.handle('ai:testConnection', async (_e, vaultPath: string) => {
   const resolved = path.resolve(vaultPath);
   const cfg = aiCredentialsMap.get(resolved);
@@ -12505,6 +12469,53 @@ const AI_FILE_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'get_design_canon',
+      description: 'Read the synchronized Ars-note canonical design-document registry and suggest likely canonical documents. Use this before reviewing or revising a GDD, core loop, worldbuilding, narrative, economy, UX, or technical design.',
+      parameters: {
+        type: 'object',
+        properties: {
+          domain: { type: 'string', description: 'Optional design responsibility such as gdd, core-loop, system, economy, worldbuilding, narrative, dialogue, performance, level, quest, ux, technical, or production.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_canonical_design_document',
+      description: 'Register one existing Markdown file as the single canonical document for a design responsibility. The synchronized registry is stored in .ars-team/design-canon.json. Use only after inspecting the file and candidate list; one domain can have only one canonical path.',
+      parameters: {
+        type: 'object',
+        properties: {
+          domain: { type: 'string', description: 'Design responsibility, for example gdd, core-loop, worldbuilding, narrative, economy, ux, or technical.' },
+          path: { type: 'string', description: 'Existing vault-relative Markdown path to register.' },
+          label: { type: 'string', description: 'Short human-readable responsibility label.' },
+          responsibility: { type: 'string', description: 'Concise statement of which rules this document owns.' },
+        },
+        required: ['domain', 'path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'analyze_design_change',
+      description: 'Analyze the cross-document and team-task impact of a proposed design change before writing. Returns direct wiki-link dependents, exact-term users, downstream design areas, linked active tasks, and schedule-decision requirements. Supply 2-8 exact affected terms when possible.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source_path: { type: 'string', description: 'Canonical vault-relative Markdown document that would be changed.' },
+          change_summary: { type: 'string', description: 'Concise proposed rule/design change, including what is added, replaced, removed, or deferred.' },
+          terms: { type: 'string', description: 'Optional JSON array, comma-separated, or newline-separated exact terms/concepts affected by the change.' },
+          max_results: { type: 'integer', description: 'Maximum impacted documents and tasks returned, from 1 to 100. Default 30.' },
+        },
+        required: ['source_path', 'change_summary'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'write_file',
       description: 'Create or overwrite a file in the vault immediately when the user asked for it. The app saves live-history and an AI rollback snapshot before applying the change.',
       parameters: {
@@ -12603,6 +12614,20 @@ const AI_FILE_TOOLS = [
           content: { type: 'string', description: 'Content to append to the file' },
         },
         required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember_project_fact',
+      description: 'Store one durable, user-established project fact, canon decision, terminology rule, or working preference in Ars-note AI memory. Use only for stable information that should remain available in future conversations; never store transient tasks, guesses, raw context, or secrets. Duplicate facts are ignored.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string', description: 'One concise, self-contained durable fact or decision.' },
+        },
+        required: ['fact'],
       },
     },
   },
@@ -12815,7 +12840,7 @@ const AI_FILE_TOOLS = [
           include_sprint_plan: { type: 'boolean', description: 'Generate .ars-team/sprints/sprint-plan-YYYYMMDD.md for weekly planning. Default true.' },
           include_member_pages: { type: 'boolean', description: 'Generate .ars-team/members/MEMBER.md personal task pages so each teammate can open their own work queue. Default true.' },
           include_task_docs: { type: 'boolean', description: 'Create missing 07_Unity_Tasks/*.md task work docs and link them from the schedule. Default true.' },
-          include_obsidian_command_center: { type: 'boolean', description: 'Generate the Ars-note team command center at the legacy-compatible path .ars-team/obsidian-command-center.md, with wiki-links, member entry points, and an AI takeover checklist. Default true.' },
+          include_team_command_center: { type: 'boolean', description: 'Generate the Ars-note team command center at .ars-team/team-command-center.md, with wiki-links, member entry points, and an AI takeover checklist. Default true.' },
           include_production_health: { type: 'boolean', description: 'Generate .ars-team/production-health.md with blocked/overdue/missing-doc/member-load/QA/narrative risk triage and AI takeover next actions. Default true.' },
           include_dashboard: { type: 'boolean', description: 'Generate .ars-team/team-dashboard.md. Default true.' },
         },
@@ -13939,6 +13964,7 @@ const AI_MUTATING_TOOLS = new Set([
   'write_file',
   'append_file',
   'refactor_vault_term',
+  'set_canonical_design_document',
   'delete_file',
   'delete_files',
   'create_folder',
@@ -13955,6 +13981,8 @@ const AI_MUTATING_TOOLS = new Set([
 const AI_READONLY_TOOLS = new Set([
   'read_file',
   'search_vault_text',
+  'get_design_canon',
+  'analyze_design_change',
   'list_files',
   'list_images',
   'read_team_schedule',
@@ -13968,9 +13996,11 @@ const AI_READONLY_TOOLS = new Set([
 
 const AI_MEMBER_TOOLS = new Set([
   ...AI_READONLY_TOOLS,
+  'remember_project_fact',
   'write_file',
   'append_file',
   'refactor_vault_term',
+  'set_canonical_design_document',
   'delete_file',
   'delete_files',
   'create_folder',
@@ -14192,6 +14222,8 @@ function aiRollbackRootsForOperation(toolName: string, args: Record<string, stri
         relativePath,
         includeMissingFile: true,
       })));
+    case 'set_canonical_design_document':
+      return uniqueAIRollbackRoots([{ relativePath: DESIGN_CANON_REGISTRY_PATH, includeMissingFile: true }]);
     case 'create_folder':
       return uniqueAIRollbackRoots([{ relativePath: rawPath, cleanupIfCreated: true }]);
     case 'copy_image':
@@ -14766,7 +14798,7 @@ function describeAIPathState(label: string, state: ReturnType<typeof inspectAIPa
 
 function teamProductionDocOptionsFromAIArgs(args: Record<string, string>): {
   includeDashboard?: boolean;
-  includeObsidianCommandCenter?: boolean;
+  includeTeamCommandCenter?: boolean;
   includeProductionHealth?: boolean;
   includeDependencyMap?: boolean;
   includeHandoff?: boolean;
@@ -14804,7 +14836,7 @@ function teamProductionDocOptionsFromAIArgs(args: Record<string, string>): {
     includeSprintPlan: parseAIToolBooleanArg((args as any).include_sprint_plan, true),
     includeMemberPages: parseAIToolBooleanArg((args as any).include_member_pages, true),
     includeTaskDocs: parseAIToolBooleanArg((args as any).include_task_docs, true),
-    includeObsidianCommandCenter: parseAIToolBooleanArg((args as any).include_obsidian_command_center, true),
+    includeTeamCommandCenter: parseAIToolBooleanArg((args as any).include_team_command_center, true),
     includeProductionHealth: parseAIToolBooleanArg((args as any).include_production_health, true),
     includeDashboard: parseAIToolBooleanArg((args as any).include_dashboard, true),
   };
@@ -14844,7 +14876,7 @@ function buildTeamProductionDocPreviewLines(vaultPath: string, args: Record<stri
       paths.push(`${TEAM_SCHEDULE_DIR}/members/${safeTeamMemberFileName(member)}.md`);
     }
   }
-  add(options.includeObsidianCommandCenter, `${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName()}`);
+  add(options.includeTeamCommandCenter, `${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName()}`);
   add(options.includeDashboard, `${TEAM_SCHEDULE_DIR}/team-dashboard.md`);
 
   const linkedDocs: string[] = Array.from(new Set<string>(tasks
@@ -15013,6 +15045,10 @@ function buildAIToolMutationPreview(vaultPath: string, toolName: string, args: R
     } catch { /* path errors already reported above */ }
     lines.push('Safety: applying will save live-history before append and create an AI rollback snapshot.');
     lines.push(`Append preview: ${summarizeAITextSample(content)}`);
+  } else if (toolName === 'set_canonical_design_document') {
+    lines.push(`Will register ${String((args as any).path || '')} as the single canonical document for domain "${String((args as any).domain || '')}".`);
+    lines.push(`Registry: ${DESIGN_CANON_REGISTRY_PATH}`);
+    lines.push('Safety: the existing registry receives live-history and an AI rollback snapshot before replacement.');
   } else if (toolName === 'refactor_vault_term') {
     const from = String((args as any).from || '');
     const to = String((args as any).to || '');
@@ -15387,6 +15423,14 @@ async function executeAITool(vaultPath: string, toolName: string, args: Record<s
   };
 
   switch (toolName) {
+    case 'remember_project_fact': {
+      const fact = String((args as any).fact || '').replace(/\s+/g, ' ').trim();
+      if (!fact) return 'Error: fact is required.';
+      if (fact.length > 1200) return 'Error: Project memory must be one concise fact under 1200 characters.';
+      FP.appendMemory(vaultPath, fact);
+      scheduleAiMemorySync(vaultPath);
+      return `Project memory updated: ${fact}`;
+    }
     case 'read_file': {
       let target;
       try { target = resolveToolPath(rawPath); } catch (err: any) { return `Error: ${err.message}`; }
@@ -15407,6 +15451,73 @@ async function executeAITool(vaultPath: string, toolName: string, args: Record<s
         return JSON.stringify(result, null, 2);
       } catch (err: any) {
         return `Error: ${err?.message || 'Vault text search failed'}`;
+      }
+    }
+    case 'get_design_canon': {
+      try {
+        const registry = readDesignCanonRegistry(vaultPath);
+        const scan = await scanAndIndexVault(vaultPath);
+        const domain = String((args as any).domain || '').trim();
+        const candidates = suggestCanonicalDocuments(scan.fileEntries, domain, 5);
+        const registered = domain
+          ? registry.entries.filter((entry) => entry.domain === domain.toLowerCase().replace(/[\s_]+/g, '-'))
+          : registry.entries;
+        return JSON.stringify({
+          ok: true,
+          registryPath: DESIGN_CANON_REGISTRY_PATH,
+          updatedAt: registry.updatedAt,
+          registered: registered.map((entry) => ({
+            ...entry,
+            exists: fs.existsSync(path.resolve(vaultPath, entry.path)),
+          })),
+          candidates,
+          advice: registered.length > 0
+            ? 'Use the registered canonical path and update it in place.'
+            : 'Inspect the best candidate before calling set_canonical_design_document. Do not register generated, recovered, conflict, draft, or version-copy files.',
+        }, null, 2);
+      } catch (err: any) {
+        return `Error: ${err?.message || 'Unable to read canonical design registry'}`;
+      }
+    }
+    case 'set_canonical_design_document': {
+      try {
+        const registryFullPath = resolveVaultRelativePath(vaultPath, DESIGN_CANON_REGISTRY_PATH);
+        saveLiveHistoryBeforeOverwrite(registryFullPath, undefined, 'ai-design-canon-register');
+        const result = setCanonicalDesignDocument(vaultPath, {
+          domain: String((args as any).domain || ''),
+          path: String((args as any).path || ''),
+          label: String((args as any).label || ''),
+          responsibility: String((args as any).responsibility || ''),
+        });
+        return JSON.stringify({
+          ok: true,
+          registryPath: DESIGN_CANON_REGISTRY_PATH,
+          entry: result.entry,
+          replaced: result.replaced || null,
+          entryCount: result.registry.entries.length,
+        }, null, 2);
+      } catch (err: any) {
+        return `Error: ${err?.message || 'Unable to register canonical design document'}`;
+      }
+    }
+    case 'analyze_design_change': {
+      try {
+        const sourcePath = String((args as any).source_path || (args as any).path || '');
+        const changeSummary = String((args as any).change_summary || '');
+        if (!changeSummary.trim()) return 'Error: change_summary is required.';
+        const scan = await scanAndIndexVault(vaultPath);
+        const registry = readDesignCanonRegistry(vaultPath);
+        const schedule = readTeamScheduleData(vaultPath);
+        const result = analyzeDesignChange(scan.fileEntries, registry, {
+          sourcePath,
+          changeSummary,
+          terms: (args as any).terms,
+          tasks: schedule.tasks || [],
+          maxResults: Math.max(1, Math.min(100, Number((args as any).max_results || 30) || 30)),
+        });
+        return JSON.stringify(result, null, 2);
+      } catch (err: any) {
+        return `Error: ${err?.message || 'Design change impact analysis failed'}`;
       }
     }
     case 'write_file': {
@@ -15764,7 +15875,7 @@ async function executeAITool(vaultPath: string, toolName: string, args: Record<s
         `Starter tasks considered=${result.taskCount}, created=${result.upsert.importedCount}, updated=${result.upsert.updatedCount}, skipped=${result.upsert.skippedCount}.`,
         `Production docs generated=${result.productionDocs.paths.length}; task docs created=${taskDocs.createdCount || 0}, linked=${taskDocs.linkedCount || 0}, upgraded=${taskDocs.upgradedCount || 0}.`,
         `Health: active=${stats.active || 0}, blocked=${stats.blocked || 0}, overdue=${stats.overdue || 0}, missingDocs=${stats.missingDocs || 0}, qaOpen=${stats.qaOpen || 0}, narrativeMissingStages=${stats.narrativeMissingStages || 0}.`,
-        'Open the Ars-note team command center at `.ars-team/obsidian-command-center.md`, then run `read_production_health` and continue from the highest-risk tasks.',
+        'Open the Ars-note team command center at `.ars-team/team-command-center.md`, then run `read_production_health` and continue from the highest-risk tasks.',
       ].join('\n');
     }
     case 'draft_narrative_tasks': {
@@ -16406,7 +16517,7 @@ function inferAIArtifactsFromTool(toolName: string, args: Record<string, string>
         `${TEAM_SCHEDULE_DIR}/changes/${teamChangeImpactFileName(teamTodayString())}`,
         `${TEAM_SCHEDULE_DIR}/plans/${teamAITakeoverPlanFileName(teamTodayString())}`,
         `${TEAM_SCHEDULE_DIR}/sprints/${teamSprintPlanFileName(teamTodayString())}`,
-        `${TEAM_SCHEDULE_DIR}/${teamObsidianCommandCenterFileName()}`,
+        `${TEAM_SCHEDULE_DIR}/${teamCommandCenterFileName()}`,
         `${TEAM_SCHEDULE_DIR}/team-dashboard.md`,
       ];
     if (toolName === 'bootstrap_team_workspace') {
@@ -16599,139 +16710,6 @@ function inferAIArtifactsFromTool(toolName: string, args: Record<string, string>
   }];
 }
 
-/* ── Smart File Relevance (Layer 2, v0.9.6) ── */
-/* Analyzes user query and auto-injects relevant file contents into context.
-   This makes AI responses more accurate without requiring explicit read_file calls. */
-
-
-
-function findRelevantFiles(entries: VaultFileEntry[], query: string, limit: number): string {
-  if (!query || query.length < 4) return '';
-  const files = entries;
-  if (files.length === 0) return '';
-
-  /* Extract meaningful words from query (skip common stop words) */
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'this',
-    'that', 'these', 'those', 'it', 'its', 'and', 'or', 'but', 'not',
-    'what', 'which', 'who', 'when', 'where', 'how', 'why', 'all', 'each',
-    'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
-    'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'because',
-    'if', 'then', 'else', 'also', 'there', 'here', 'me', 'my', 'we', 'our',
-    'you', 'your', 'he', 'she', 'they', 'them', 'him', 'her', 'his',
-    /* Chinese stop words */
-    '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一',
-    '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着',
-    '没有', '看', '好', '自己', '这', '他', '她', '它', '吗', '吧', '呢',
-    '什么', '怎么', '哪', '那个', '这个', '能', '让', '把', '被', '从',
-    '对', '给', '可以', '还是', '或者', '但是', '因为', '所以', '然后',
-    '如果', '关于', '帮我', '帮', '写', '做', '创建', '生成', '一下',
-  ]);
-
-  /* Tokenize: split by spaces and also by CJK characters for mixed-language queries */
-  const tokens: string[] = [];
-  /* Split on whitespace and punctuation */
-  const parts = query.toLowerCase().split(/[\s,，。.!！?？、；;：:""''（）()\[\]【】]+/);
-  for (const part of parts) {
-    if (part.length >= 2 && !stopWords.has(part)) {
-      tokens.push(part);
-    }
-    /* Also extract CJK character sequences (2+ chars) */
-    const cjkMatches = part.match(/[\u4e00-\u9fff\u3400-\u4dbf]{2,}/g);
-    if (cjkMatches) {
-      for (const cjk of cjkMatches) {
-        if (!stopWords.has(cjk)) tokens.push(cjk);
-      }
-    }
-  }
-
-  if (tokens.length === 0) return '';
-
-  /* Score each file */
-  const scored = files.map(file => {
-    let score = 0;
-    const fileName = file.relPath.replace('.md', '').toLowerCase();
-    const titleLower = file.title.toLowerCase();
-
-    for (const token of tokens) {
-      /* File name match (highest relevance) */
-      if (fileName.includes(token)) score += 10;
-      /* Title match */
-      if (titleLower.includes(token)) score += 8;
-      /* Tag match */
-      for (const tag of file.tags) {
-        if (tag.toLowerCase().includes(token)) score += 6;
-      }
-      /* Content mention (weighted less) */
-      const contentLower = file.searchContent;
-      /* Count occurrences but cap at 5 for scoring */
-      let count = 0;
-      let idx = 0;
-      while (count < 5) {
-        idx = contentLower.indexOf(token, idx);
-        if (idx === -1) break;
-        count++;
-        idx += token.length;
-      }
-      score += count * 2;
-    }
-
-    return { file, score };
-  });
-
-  /* Sort by score and take top matches */
-  scored.sort((a, b) => b.score - a.score);
-  const relevant = scored.filter(s => s.score >= 6).slice(0, limit);
-
-  if (relevant.length === 0) return '';
-
-  /* Build the context injection */
-  const sections: string[] = [];
-  sections.push('=== RELEVANT VAULT FILES (auto-loaded for context) ===');
-  for (const { file } of relevant) {
-    const truncated = file.content.length > 3000
-      ? file.content.slice(0, 3000) + '\n...(truncated)'
-      : file.content;
-    sections.push('--- FILE: ' + file.relPath + ' ---');
-    sections.push(truncated);
-    sections.push('');
-  }
-
-  return sections.join('\n');
-}
-
-
-/* ── Context Window Manager (v0.9.5) ── */
-/* For 128K-1M context models: generous limit, only compress when truly needed */
-const CTX_CHAR_LIMIT = 500000; /* ~125K tokens — safe for 128K+ context models */
-
-function manageContextWindow(msgs: Array<{ role: string; content: string; tool_calls?: any; tool_call_id?: string }>): Array<{ role: string; content: string; tool_calls?: any; tool_call_id?: string }> {
-  /* Calculate total size */
-  const totalChars = msgs.reduce((sum, m) => sum + (m.content || '').length, 0);
-  if (totalChars <= CTX_CHAR_LIMIT) return msgs;
-
-  /* Split: system (keep) + history (compress) + recent (keep) */
-  const system = msgs.filter(m => m.role === 'system');
-  const nonSystem = msgs.filter(m => m.role !== 'system');
-
-  /* Keep last 10 messages (5 rounds) fully intact */
-  const keepRecent = 10;
-  const recent = nonSystem.slice(-keepRecent);
-  const older = nonSystem.slice(0, -keepRecent);
-
-  /* Compress older messages: keep first 800 chars per message (preserves most detail) */
-  const compressed = older.map(m => {
-    const content = m.content || '';
-    const shortened = content.length > 800 ? content.slice(0, 800) + '...(compressed)' : content;
-    return { ...m, content: shortened };
-  });
-
-  return [...system, ...compressed, ...recent];
-}
-
 const CANVAS_KEYWORD_RE = /(?:canvas|canva|\u753b\u5e03|\u767d\u677f|\u6d41\u7a0b\u56fe|\u601d\u7ef4\u5bfc\u56fe|\u8111\u56fe|\u770b\u677f|\u5173\u7cfb\u56fe|\u62d3\u6251\u56fe|pipeline|flow\s*chart|flowchart|mind\s*map|kanban|visual\s*board)/i;
 const CANVAS_CREATE_INTENT_RE = /(?:\u505a\u6210|\u6574\u7406\u6210|\u8f6c\u6210|\u8f49\u6210|\u751f\u6210|\u521b\u5efa|\u5275\u5efa|\u65b0\u5efa|\u753b(?:\u4e00\u4e2a)?|\u505a\u4e00\u4e2a|\u7528.*(?:\u505a|\u751f\u6210|\u521b\u5efa)|make|create|draw|build|turn\s+.*\s+into)/i;
 const WIREFRAME_KEYWORD_RE = /(?:wireframe|mockup|prototype|\bui\b|hud|\u754c\u9762|\u539f\u578b|\u7ebf\u6846\u56fe|\u83dc\u5355|\u4ea4\u4e92|\u6309\u94ae)/i;
@@ -16755,7 +16733,7 @@ function hasMarkdownRepairIntent(text: string): boolean {
 
 function hasHumanizerIntent(text: string): boolean {
   const prompt = text || '';
-  return /(?:humanize|de-?ai|ai[-\s]*sounding|robotic|natural(?:ly)?|human(?:\s+voice|\s+written)?|\u53bb\s*AI\s*\u5473|\u53bbai\u5473|\u4e0d\u50cfAI|\u50cf\u4eba\u5199|\u66f4\u81ea\u7136|\u81ea\u7136\u4e00\u70b9|\u6da6\u8272|\u6539\u5199|\u91cd\u5199|\u4eba\u8bdd|\u522b\u592aAI|\u673a\u5668\u5473|\u6587\u98ce)/i.test(prompt);
+  return /(?:humanize|de-?ai|ai[-\s]*sounding|robotic|natural(?:ly)?|human(?:\s+voice|\s+written)?|\u53bb\s*AI\s*\u5473|\u53bbai\u5473|\u4e0d\u50cfAI|\u50cf\u4eba\u5199|\u7c7b\u4eba\u5316|\u81ea\u7136\u5316|\u4eba\u5de5\u5199\u4f5c\u611f|\u66f4\u81ea\u7136|\u81ea\u7136\u4e00\u70b9|\u6da6\u8272|\u6539\u5199|\u91cd\u5199|\u4eba\u8bdd|\u522b\u592aAI|\u673a\u5668\u5473|\u6587\u98ce)/i.test(prompt);
 }
 
 function shouldAutoHumanizeMarkdownWrite(relPath: string, content: string, userText: string): boolean {
@@ -16769,230 +16747,15 @@ function shouldAutoHumanizeMarkdownWrite(relPath: string, content: string, userT
   return true;
 }
 
-function autoHumanizeMarkdownContent(content: string): { content: string; changed: boolean; count: number } {
-  const lines = String(content || '').split(/\r?\n/);
-  let count = 0;
-  let inFence = false;
-  let fenceMarker = '';
-  let inFrontmatter = lines[0]?.trim() === '---';
-  let frontmatterClosed = !inFrontmatter;
-
-  const protectSegments = (line: string) => {
-    const protectedSegments: string[] = [];
-    const text = line.replace(/(`[^`]*`|\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\))/g, (match) => {
-      const token = `@@ARSNOTE_PROTECTED_${protectedSegments.length}@@`;
-      protectedSegments.push(match);
-      return token;
-    });
-    return {
-      text,
-      restore: (value: string) => value.replace(/@@ARSNOTE_PROTECTED_(\d+)@@/g, (_m, idx) => protectedSegments[Number(idx)] || _m),
-    };
-  };
-
-  const replaceTracked = (value: string, pattern: RegExp, replacement: string | ((match: string, ...args: any[]) => string)) => {
-    return value.replace(pattern, (...args) => {
-      count += 1;
-      const match = args[0];
-      return typeof replacement === 'function' ? replacement(match, ...args.slice(1)) : replacement;
-    });
-  };
-
-  const cleanupLine = (line: string) => {
-    const protectedLine = protectSegments(line);
-    let next = protectedLine.text;
-    next = replaceTracked(next, /\bGreat question!?\s*/gi, '');
-    next = replaceTracked(next, /\bI hope this helps!?\s*/gi, '');
-    next = replaceTracked(next, /\bLet me know if[^.。!！?？]*(?:[.。!！?？]|$)/gi, '');
-    next = replaceTracked(next, /\bAs an AI(?: language model)?[,，]?\s*/gi, '');
-    next = replaceTracked(next, /\bIt is important to note that\s*/gi, '');
-    next = replaceTracked(next, /\bIt'?s important to note that\s*/gi, '');
-    next = replaceTracked(next, /\bIt is worth noting that\s*/gi, '');
-    next = replaceTracked(next, /\bIn order to\b/gi, 'To');
-    next = replaceTracked(next, /\bdue to the fact that\b/gi, 'because');
-    next = replaceTracked(next, /\bat this point in time\b/gi, 'now');
-    next = replaceTracked(next, /\bserves as an?\b/gi, (match) => /\ban\b/i.test(match) ? 'is an' : 'is a');
-    next = replaceTracked(next, /\bserves as\b/gi, 'is');
-    next = replaceTracked(next, /\bstands as an?\b/gi, (match) => /\ban\b/i.test(match) ? 'is an' : 'is a');
-    next = replaceTracked(next, /\bfunctions as\b/gi, 'is');
-    next = replaceTracked(next, /\bacts as an?\b/gi, (match) => /\ban\b/i.test(match) ? 'is an' : 'is a');
-    next = replaceTracked(next, /\bboasts\b/gi, 'has');
-    next = replaceTracked(next, /\butili[sz]e\b/gi, 'use');
-    next = replaceTracked(next, /\bleverage\b/gi, 'use');
-    next = replaceTracked(next, /\bdelve into\b/gi, 'look at');
-    next = replaceTracked(next, /\bin the realm of\b/gi, 'in');
-    next = replaceTracked(next, /\bplays a crucial role in\b/gi, 'helps');
-    next = replaceTracked(next, /\bcrucial\b/gi, 'important');
-    next = replaceTracked(next, /\brobust\b/gi, 'solid');
-    next = replaceTracked(next, /\bseamless\b/gi, 'smooth');
-    next = replaceTracked(next, /\bcomprehensive\b/gi, 'complete');
-    next = replaceTracked(next, /\bmeticulous\b/gi, 'careful');
-    next = replaceTracked(next, /\bvibrant\b/gi, 'lively');
-    next = replaceTracked(next, /\bgroundbreaking\b/gi, 'new');
-    next = replaceTracked(next, /\btransformative\b/gi, 'major');
-    next = replaceTracked(next, /\bparamount\b/gi, 'important');
-    next = replaceTracked(next, /\bthe future looks bright\b[.!]?/gi, '');
-    next = replaceTracked(next, /\bexciting times lie ahead\b[.!]?/gi, '');
-    next = next.replace(/[ \t]{2,}/g, ' ').replace(/\s+([,.!?;:，。！？；：])/g, '$1');
-    return protectedLine.restore(next);
-  };
-
-  const nextLines = lines.map((line, index) => {
-    const trimmed = line.trim();
-    if (inFrontmatter) {
-      if (index > 0 && trimmed === '---') {
-        inFrontmatter = false;
-        frontmatterClosed = true;
-      }
-      return line;
-    }
-    if (!frontmatterClosed && trimmed === '---') {
-      inFrontmatter = true;
-      return line;
-    }
-    const fenceStart = trimmed.match(/^(```+|~~~+)/);
-    if (fenceStart) {
-      const marker = fenceStart[1].slice(0, 3);
-      if (!inFence) {
-        inFence = true;
-        fenceMarker = marker;
-      } else if (marker === fenceMarker) {
-        inFence = false;
-        fenceMarker = '';
-      }
-      return line;
-    }
-    if (inFence) return line;
-    if (!trimmed) return line;
-    if (trimmed.includes('|')) return line;
-    if (/^\s{0,3}(#{1,6}\s*)?$/.test(line)) return line;
-    return cleanupLine(line);
-  });
-
-  const nextContent = nextLines.join(content.includes('\r\n') ? '\r\n' : '\n');
-  return { content: nextContent, changed: nextContent !== content, count };
-}
-
 function shouldAutoCreateCanvasFromPrompt(prompt: string): boolean {
   return !hasMarkdownRepairIntent(prompt) && !hasHumanizerIntent(prompt) && hasStrictCanvasCreationIntent(prompt);
-}
-
-type AITaskPrimary = 'markdown-spec' | 'markdown-repair' | 'humanize' | 'terminology-migration' | 'canvas' | 'wireframe' | 'file-operation' | 'team-operation' | 'direct-answer';
-
-interface AITaskPolicy {
-  primary: AITaskPrimary;
-  allowCanvas: boolean;
-  allowWireframe: boolean;
-  allowTeamTools?: boolean;
-  allowMutations?: boolean;
-  requestedPaths?: string[];
-  systemHint: string;
-}
-
-function hasWrittenSpecIntent(text: string): boolean {
-  return /(?:\u5199|\u6574\u7406|\u6587\u6863|\u8bf4\u660e|\u9700\u6c42|\u7b56\u5212|\u73a9\u6cd5|\u673a\u5236|\u89c4\u5219|\u6570\u503c|\u7ecf\u6d4e|\u6210\u957f|\u8fdb\u5ea6|\u5faa\u73af|\u624b\u611f|\u5173\u5361|\u7cfb\u7edf\u8bbe\u8ba1|\u7f8e\u672f\u9700\u6c42|\u7f8e\u5de5\u9700\u6c42|\u6280\u672f\u9700\u6c42|\u5f00\u53d1\u9700\u6c42|\u89c4\u683c|\u5b8c\u6574\u70b9|\u65b9\u4fbf\u6211\u770b|spec|requirements|requirement\s+doc|production\s+spec|gdd|prd|game\s*design|system\s*design|gameplay|mechanic|economy|progression|balance|balancing|level\s*design)/i.test(text);
-}
-
-function hasVisualBoardIntent(text: string): boolean {
-  return CANVAS_KEYWORD_RE.test(text);
-}
-
-function hasWireframeIntent(text: string): boolean {
-  return /(?:wireframe|mockup|prototype|\bui\b|hud|\u754c\u9762|\u539f\u578b|\u83dc\u5355|\u4ea4\u4e92|\u6309\u94ae)/i.test(text);
-}
-
-function explicitlyRequestsVisualArtifact(text: string): boolean {
-  return /(?:\u505a\u6210|\u751f\u6210|\u753b|\u505a\u4e00\u4e2a|\u521b\u5efa|\u7528.*(?:canvas|canva|\u753b\u5e03|\u6d41\u7a0b\u56fe|\u770b\u677f|\u601d\u7ef4\u5bfc\u56fe)|make\s+(?:a\s+)?(?:canvas|flowchart|wireframe|mockup|kanban|mind\s*map)|create\s+(?:a\s+)?(?:canvas|flowchart|wireframe|mockup|kanban|mind\s*map))/i.test(text);
-}
-
-function buildAITaskPolicy(prompt: string, controlMode: AIControlMode = 'readonly'): AITaskPolicy {
-  const text = prompt || '';
-  const wantsMarkdownRepair = hasMarkdownRepairIntent(text);
-  const wantsHumanizer = hasHumanizerIntent(text);
-  const wantsSpec = hasWrittenSpecIntent(text);
-  const wantsCanvas = hasVisualBoardIntent(text);
-  const wantsWireframe = hasWireframeIntent(text);
-  const explicitVisual = explicitlyRequestsVisualArtifact(text);
-  const explicitCanvas = wantsCanvas && hasStrictCanvasCreationIntent(text);
-
-  let primary: AITaskPrimary = 'direct-answer';
-  if (wantsMarkdownRepair && !explicitCanvas) {
-    primary = 'markdown-repair';
-  } else if (wantsHumanizer && !explicitCanvas) {
-    primary = 'humanize';
-  } else if (wantsSpec && !explicitCanvas) {
-    primary = 'markdown-spec';
-  } else if (explicitCanvas) {
-    primary = 'canvas';
-  } else if (wantsWireframe && explicitVisual && !wantsSpec) {
-    primary = 'wireframe';
-  }
-
-  const allowCanvas = primary === 'canvas';
-  const allowWireframe = primary === 'wireframe';
-  const lines = [
-    '=== Ars-note AI Task Policy ===',
-    `Primary deliverable: ${primary}`,
-    `Canvas tool allowed: ${allowCanvas ? 'yes' : 'no'}`,
-    `Wireframe tool allowed: ${allowWireframe ? 'yes' : 'no'}`,
-    `AI control mode: ${aiControlModeLabel(controlMode)} (${controlMode})`,
-    controlMode === 'readonly'
-      ? 'Mode rule: only analyze and read. Do not attempt to write, delete, create, apply confirmations, or update team schedules.'
-    : controlMode === 'member'
-        ? 'Mode rule: ordinary file changes are allowed immediately when the user asks, but team-wide production schedule/bootstrap/doc-refresh tools are not available.'
-        : 'Mode rule: producer-level team schedule and production-flow tools are available immediately when the user asks.',
-    'Safety mode: read tools may run immediately; write/delete/create/task-update tools also run immediately in execution modes. The app records live-history, AI trash, and rollback snapshots automatically.',
-    'Sync recovery rule: when the user asks to repair old sync data, missing GDD/worldbuilding files, conflict copies, or stale overwrites, call read_sync_recovery_advisor first, then apply_sync_recovery_advisor_plan when they ask you to repair/apply it.',
-    'Do not ask the user to copy a confirmation token. If the user clearly asks you to write, delete, create, repair, or take over production flow, use the appropriate tool directly.',
-  ];
-
-  if (primary === 'markdown-repair') {
-    lines.push(
-      'The user is asking to inspect or repair an existing Markdown document. Use read_file on the target .md file, fix only the requested Markdown/table formatting, then write_file back to the same Markdown file.',
-      'Do not create Canvas, Excalidraw, workspace summaries, visual briefs, companion .visual.md files, or team production docs for Markdown/table repair tasks.',
-      'For table-format repair, keep content unchanged except row breaks, separator rows, alignment markers, escaped pipes, and malformed compressed table layout.'
-    );
-  } else if (primary === 'humanize') {
-    lines.push(
-      'The user is asking to humanize, polish, rewrite, or remove AI-sounding patterns from text. Use selected text first if provided; otherwise use the current note or referenced .md file.',
-      'Preserve meaning, facts, canon, Markdown structure, frontmatter, wiki-links, tables, code blocks, task IDs, acceptance criteria, and production details.',
-      'If applying changes to a file, use read_file on the target .md file and write_file back to the same Markdown file. Do not create Canvas, Excalidraw, workspace summaries, visual briefs, companion .visual.md files, or team production docs.'
-    );
-  } else if (primary === 'markdown-spec') {
-    lines.push(
-      'The user is asking for a written production document. Use polished Markdown and do not create Canvas or Excalidraw artifacts.',
-      'For game/UI/art/technical requirements, include: design intent, player fantasy, goals/non-goals, core loop, mechanic rules, progression/economy, balance knobs, art requirements, technical requirements, data/config fields, interaction states, QA/telemetry, acceptance criteria, risks, open questions, and next actions.',
-      'If the user references an existing UI prototype, canvas, or current file, read the relevant file first and extract requirements from it.'
-    );
-  } else if (primary === 'canvas') {
-    lines.push(
-      'The user explicitly wants a visual planning board. Use create_canvas with a title card, legend, grouped lanes, readable cards, and connected dependencies.',
-      'Never put dense paragraphs in one card. Split long content into multiple connected cards.',
-      'Treat the canvas as a high-level map. Put production details, acceptance criteria, and implementation notes in Markdown.'
-    );
-  } else if (primary === 'wireframe') {
-    lines.push(
-      'The user explicitly wants a UI prototype/wireframe. Use create_wireframe with 1-3 focused screens and short labels that fit inside boxes.',
-      'Put detailed requirements in Markdown, not inside tiny wireframe labels.',
-      'Prefer realistic layout regions, states, and component names over dense explanatory text.'
-    );
-  } else {
-    lines.push('Answer directly unless the user explicitly asks you to create or edit a file.');
-  }
-
-  return {
-    primary,
-    allowCanvas,
-    allowWireframe,
-    systemHint: lines.join('\n'),
-  };
 }
 
 function getAIFileToolsForPolicy(policy: AITaskPolicy, controlMode: AIControlMode): typeof AI_FILE_TOOLS {
   return AI_FILE_TOOLS.filter((tool: any) => {
     const name = tool?.function?.name;
     if (!isAIToolAllowedInMode(name, controlMode)) return false;
-    if (policy.primary === 'direct-answer' && isAIToolMutationName(name)) return false;
+    if (!policy.allowMutations && isAIToolMutationName(name)) return false;
     if (['bootstrap_team_workspace', 'draft_narrative_tasks', 'sync_team_task_docs', 'upsert_team_tasks', 'generate_team_production_docs'].includes(name) && !policy.allowTeamTools) return false;
     if (policy.primary === 'markdown-repair' || policy.primary === 'humanize') {
       return name === 'read_file' || name === 'write_file' || name === 'list_files';
@@ -17046,6 +16809,8 @@ function appendAIAutomatedVerification(
 
   if (['write_file', 'append_file', 'create_canvas', 'create_wireframe', 'create_folder'].includes(toolName)) {
     inspectPath(String(args.path || ''), 'present');
+  } else if (toolName === 'set_canonical_design_document') {
+    inspectPath(DESIGN_CANON_REGISTRY_PATH, 'present');
   } else if (toolName === 'refactor_vault_term') {
     try {
       const parsed = JSON.parse(result);
@@ -17119,11 +16884,17 @@ ipcMain.handle('ai:cancelChat', async (event, requestId: string) => {
   return { ok: aiRequestRegistry.cancel(event.sender.id, normalizedRequestId) };
 });
 
-ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{ role: string; content: string }>, options?: { controlMode?: string; requestId?: string }) => {
+ipcMain.handle('ai:sendChat', async (
+  event,
+  vaultPath: string,
+  messages: Array<{ role: string; content: string }>,
+  options?: { controlMode?: string; requestId?: string; currentFilePath?: string },
+) => {
   const resolved = path.resolve(vaultPath);
   const cfg = aiCredentialsMap.get(resolved);
   if (!cfg || !cfg.baseUrl) return { ok: false, error: 'AI not configured', createdAt: new Date().toISOString() };
   try { FP.initMemorySystem(resolved); } catch {}
+  try { FP.consolidateMemory(resolved); } catch {}
   const fpc = FP.buildFivePillarContext(resolved);
 
   /* Scan vault once: produces both index text and file entries (v0.9.6) */
@@ -17133,8 +16904,16 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
   const lastUserText = extractAIUserIntentText(lastUserMsg?.content || '');
   const controlMode = normalizeAIControlMode(options?.controlMode);
-  const taskPolicy = buildAITaskContract(lastUserText, controlMode);
+  const taskPolicy = buildAITaskContract(lastUserText, controlMode, options?.currentFilePath);
   const policyTools = getAIFileToolsForPolicy(taskPolicy, controlMode);
+  let designCanonContext = '';
+  if (taskPolicy.primary === 'markdown-spec' || taskPolicy.primary === 'design-review' || taskPolicy.primary === 'terminology-migration') {
+    try {
+      designCanonContext = buildDesignCanonPromptContext(resolved, vaultScan.fileEntries);
+    } catch (err: any) {
+      designCanonContext = `=== ARS-NOTE CANONICAL DESIGN DOCUMENTS ===\nRegistry unavailable: ${err?.message || 'unknown error'}`;
+    }
+  }
   const retrieval = lastUserMsg
     ? retrieveRelevantVaultContext(vaultScan.fileEntries, lastUserText, {
       maxChunks: 8,
@@ -17143,7 +16922,8 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
     })
     : null;
   const relevantCtx = retrieval?.contextText || '';
-  const relevantSkillContext = lastUserText ? FP.getRelevantSkills(resolved, lastUserText) : '';
+  const relevantSkillMatches = lastUserText ? FP.getRelevantSkillMatches(resolved, lastUserText) : [];
+  const relevantSkillContext = relevantSkillMatches.map(match => match.context).join('\n\n');
   const aiToolSafety: AIToolSafetyContext = {
     lastUserText,
     confirmedTokens: extractAIConfirmedTokens(lastUserText),
@@ -17158,14 +16938,15 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
     if (fpc) sysContent += '\n\n' + fpc;
     if (vaultScan.indexText) sysContent += '\n\n' + vaultScan.indexText;
     if (relevantCtx) sysContent += '\n\n' + relevantCtx;
+    if (designCanonContext) sysContent += '\n\n' + designCanonContext;
     if (relevantSkillContext) sysContent += '\n\n=== RELEVANT LEARNED SKILLS ===\n' + relevantSkillContext;
     // Keep the task contract and Ars-note identity after all retrieved context.
     sysContent += '\n\n' + taskPolicy.systemHint;
     messages = [{ ...messages[0], content: sysContent }, ...messages.slice(1)];
   }
 
-  try { FP.consolidateMemory(resolved); } catch {}
   const toolCallsLog: AIToolCallLog[] = [];
+  let requestSucceeded = false;
   let cur = [...messages]; let ts = true;
   let lastContextUsage: AIContextWindowUsage = fitAIContextWindow(cur, AI_RUNTIME_CONTEXT_TOKEN_LIMIT).usage;
   const requestId = options?.requestId?.trim() || crypto.randomUUID();
@@ -17189,7 +16970,24 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
         if (requestHandle.signal.aborted) throw fe;
         if (ts && r === 0) { ts = false; const pb = cfg.provider === 'ollama' ? JSON.stringify({ model: cfg.model, messages: managedCur, stream: false }) : JSON.stringify({ model: cfg.model, messages: managedCur, max_tokens: 8192, temperature: 0.55 }); res = await fetch(url, { method: 'POST', headers: h, body: pb, signal: requestHandle.signal }); } else throw fe;
       }
-      if (!res.ok) { const et = await res.text().catch(() => ''); const se = et.replace(/Bearer\s+\S+/gi, 'Bearer ***'); return { ok: false, error: 'HTTP ' + res.status + ': ' + se.slice(0, 300), toolCalls: toolCallsLog, createdAt: new Date().toISOString() }; }
+      if (!res.ok) {
+        const et = await res.text().catch(() => '');
+        if (ts && r === 0 && shouldRetryAIRequestWithoutTools(res.status, et)) {
+          ts = false;
+          const plainBody = cfg.provider === 'ollama'
+            ? JSON.stringify({ model: cfg.model, messages: managedCur, stream: false })
+            : JSON.stringify({ model: cfg.model, messages: managedCur, max_tokens: 8192, temperature: 0.55 });
+          res = await fetch(url, { method: 'POST', headers: h, body: plainBody, signal: requestHandle.signal });
+        } else {
+          const se = et.replace(/Bearer\s+\S+/gi, 'Bearer ***');
+          return { ok: false, error: 'HTTP ' + res.status + ': ' + se.slice(0, 300), toolCalls: toolCallsLog, createdAt: new Date().toISOString() };
+        }
+      }
+      if (!res.ok) {
+        const et = await res.text().catch(() => '');
+        const se = et.replace(/Bearer\s+\S+/gi, 'Bearer ***');
+        return { ok: false, error: 'HTTP ' + res.status + ': ' + se.slice(0, 300), toolCalls: toolCallsLog, createdAt: new Date().toISOString() };
+      }
       const raw = await res.json(); let ct = ''; let rm = cfg.model; let tc: any[] = [];
       if (cfg.provider === 'ollama') { ct = (raw as AIChatOllamaResponse).message?.content || ''; rm = (raw as AIChatOllamaResponse).model || cfg.model; tc = (raw as AIChatOllamaResponse).message?.tool_calls || []; }
       else {
@@ -17238,6 +17036,7 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
           }
         }
 
+        requestSucceeded = true;
         return { ok: true, content: ct, model: rm, toolCalls: toolCallsLog, contextUsage: lastContextUsage, createdAt: new Date().toISOString() };
       }
       /* Only push tool-calling assistant msg if not already pushed above (DeepSeek reasoning case) */
@@ -17266,6 +17065,7 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
         const tm: any = { role: 'tool', content: result }; if (t.id) tm.tool_call_id = t.id; cur.push(tm);
       }
     }
+    requestSucceeded = !toolCallsLog.some(call => /^Error:/i.test(call.result));
     return { ok: true, content: 'Tool execution completed.', toolCalls: toolCallsLog, contextUsage: lastContextUsage, createdAt: new Date().toISOString() };
   } catch (err: any) {
     const abortReason = requestHandle.getAbortReason();
@@ -17283,14 +17083,29 @@ ipcMain.handle('ai:sendChat', async (event, vaultPath: string, messages: Array<{
     };
   } finally {
     requestHandle.dispose();
-    try { FP.saveConversation(resolved, cur); } catch {}
-    if (toolCallsLog.length > 0) try {
-      const um = messages.find((m: any) => m.role === 'user');
-      if (um) {
-        FP.createSkill(resolved, { name: 'auto-' + Date.now().toString(36), trigger: um.content.slice(0, 100), description: 'Auto: ' + um.content.slice(0, 60), steps: 'Tools: ' + toolCallsLog.map(tc => tc.name).join(', ') + '\n' + toolCallsLog.map(tc => '- ' + tc.name + ': ' + tc.result.slice(0, 100)).join('\n') });
-        scheduleAiMemorySync(resolved);
-      }
-    } catch {}
+    let memoryChanged = false;
+    const skillRunSucceeded = requestSucceeded && !toolCallsLog.some(call => /^Error:|FAILED/i.test(call.result));
+    for (const match of relevantSkillMatches) {
+      try {
+        FP.updateSkillUsage(resolved, match.id, skillRunSucceeded);
+        memoryChanged = true;
+      } catch {}
+    }
+    const successfulToolNames = toolCallsLog
+      .filter(call => !/^Error:|FAILED/i.test(call.result))
+      .map(call => call.name);
+    const hasReusableMutation = successfulToolNames.some(name => AI_MUTATING_TOOLS.has(name));
+    if (lastUserText && hasReusableMutation && skillRunSucceeded) {
+      try {
+        const learning = FP.observeReusableWorkflow(resolved, {
+          userText: lastUserText,
+          toolNames: successfulToolNames,
+          successful: true,
+        });
+        memoryChanged = memoryChanged || learning.observed;
+      } catch {}
+    }
+    if (memoryChanged) scheduleAiMemorySync(resolved);
   }
 });
 
@@ -17317,6 +17132,11 @@ const REQUIRED_LIVE_SYNC_SERVER_CAPABILITIES = [
   { key: 'serializedVaultWrites', label: 'serialized per-Vault writes', critical: true },
   { key: 'startupStorageReadiness', label: 'storage-ready startup gate', critical: true },
   { key: 'metadataOnlySnapshots', label: 'metadata-only reconnect snapshots', critical: true },
+  { key: 'constantTimeAuthentication', label: 'constant-time API key authentication', critical: true },
+  { key: 'authFailureRateLimit', label: 'authentication failure rate limit', critical: true },
+  { key: 'apiKeyHeaderOnly', label: 'header-only WebSocket credentials', critical: true },
+  { key: 'httpSecurityHeaders', label: 'HTTP security headers', critical: true },
+  { key: 'webSocketProtocolValidation', label: 'WebSocket protocol validation', critical: true },
   { key: 'serverDataSnapshots', label: 'server full snapshots', critical: false },
   { key: 'serverSnapshotFileRestore', label: 'server snapshot file restore', critical: false },
   { key: 'liveSyncClientHistory', label: 'live-sync client history', critical: false },
@@ -18704,8 +18524,6 @@ function sendLiveSyncSelfTestMessage(
         appVersion: app.getVersion?.() || APP_VERSION,
         protocolVersion: String(LIVE_SYNC_SELF_TEST_PROTOCOL_VERSION),
       });
-      if (apiKey) query.set('apiKey', apiKey);
-
       const wsKey = buildSelfTestWebSocketKey();
       const headers: Record<string, string> = {
         Host: `${host}:${port}`,
@@ -18857,8 +18675,6 @@ function openLiveSyncSelfTestObserver(
       appVersion: app.getVersion?.() || APP_VERSION,
       protocolVersion: String(LIVE_SYNC_SELF_TEST_PROTOCOL_VERSION),
     });
-    if (apiKey) query.set('apiKey', apiKey);
-
     const wsKey = buildSelfTestWebSocketKey();
     const headers: Record<string, string> = {
       Host: `${host}:${port}`,
@@ -22171,19 +21987,24 @@ ipcMain.handle('sync:restoreServerLiveHistoryBatch', async (_e, vaultPath: strin
 });
 
 ipcMain.handle('export:pdf', async (event, options: { html: string; fileName: string }) => {
-  const win = BrowserWindow.getFocusedWindow();
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow || BrowserWindow.getFocusedWindow();
   if (!win) return { ok: false, error: 'No window' };
 
+  let pdfWin: BrowserWindow | null = null;
   try {
+    const html = typeof options?.html === 'string' ? options.html : '';
+    if (!html || Buffer.byteLength(html, 'utf8') > 32 * 1024 * 1024) {
+      return { ok: false, error: 'Invalid or oversized export content' };
+    }
     /* Create a hidden window to render the HTML */
-    const pdfWin = new BrowserWindow({
+    pdfWin = new BrowserWindow({
       width: 800,
       height: 1100,
       show: false,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
-    await pdfWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(options.html));
+    await pdfWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 
     /* Wait for content to render */
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -22194,23 +22015,34 @@ ipcMain.handle('export:pdf', async (event, options: { html: string; fileName: st
       margins: { marginType: 'default' },
     });
 
-    pdfWin.close();
-
     /* Ask user where to save */
-    const defaultName = (options.fileName || 'document').replace(/\.md$/i, '') + '.pdf';
-    const saveResult = await dialog.showSaveDialog(win, {
-      title: 'Export PDF',
-      defaultPath: defaultName,
-      filters: [{ name: 'PDF', extensions: ['pdf'] }],
-    });
-
-    if (saveResult.canceled) {
-      return { ok: false, error: 'Cancelled' };
+    const baseName = path.basename(String(options?.fileName || 'document'))
+      .replace(/\.md$/i, '')
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') || 'document';
+    let outputPath = '';
+    const smokeOutputPath = process.env.ARS_NOTE_SMOKE_TEST === '1'
+      ? String(process.env.ARS_NOTE_PDF_SMOKE_OUTPUT || '').trim()
+      : '';
+    if (smokeOutputPath) {
+      outputPath = path.resolve(smokeOutputPath);
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    } else {
+      const saveResult = await dialog.showSaveDialog(win, {
+        title: 'Export PDF',
+        defaultPath: baseName + '.pdf',
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      });
+      if (saveResult.canceled || !saveResult.filePath) {
+        return { ok: false, error: 'Cancelled' };
+      }
+      outputPath = saveResult.filePath;
     }
 
-    fs.writeFileSync(saveResult.filePath!, pdfData);
-    return { ok: true, path: saveResult.filePath! };
+    fs.writeFileSync(outputPath, pdfData);
+    return { ok: true, path: outputPath };
   } catch (err: any) {
     return { ok: false, error: err.message };
+  } finally {
+    if (pdfWin && !pdfWin.isDestroyed()) pdfWin.destroy();
   }
 });

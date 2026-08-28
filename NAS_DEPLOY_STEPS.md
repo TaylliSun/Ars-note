@@ -18,7 +18,7 @@
 
 1. 上传发布包里的 `docker-compose.nas.yml`、`.env.example` 和 `server` 文件夹。
 2. 将 `.env.example` 复制为 `.env`。
-3. 在 `.env` 中填写独立的随机密钥，至少 16 个字符，建议 32 个以上：
+3. 在 `.env` 中填写独立的随机密钥，至少 32 个字符：
 
    ```dotenv
    ARS_NOTE_SERVER_API_KEY=请替换为随机强密钥
@@ -48,7 +48,7 @@
 3. 只覆盖发布包中的 `server/dist` 到 NAS 对应目录。
 4. 不要覆盖或删除 `.env` 和 `sync-data`。
 5. 在 NAS 容器管理器中重建或重启 `ars-note-sync`。
-6. 确认 `/health` 显示服务器版本 `1.5.64`，然后再让全部客户端继续同步。
+6. 确认 `/health` 显示服务器版本 `1.5.67`，然后再让全部客户端继续同步。
 
 ## 网络建议
 

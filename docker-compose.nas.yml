@@ -20,16 +20,27 @@ services:
       - ARSNOTE_HOST=0.0.0.0
       - ARS_NOTE_SERVER_API_KEY=${ARS_NOTE_SERVER_API_KEY:?Set ARS_NOTE_SERVER_API_KEY in .env}
       - ARS_NOTE_REQUIRE_API_KEY=true
+      - ARS_NOTE_MIN_API_KEY_LENGTH=32
+      - ARS_NOTE_SECURITY_MODE=lan
+      - ARS_NOTE_ALLOW_API_KEY_IN_QUERY=false
+      - ARS_NOTE_AUTH_FAILURE_LIMIT=8
+      - ARS_NOTE_AUTH_BLOCK_SECONDS=900
+      - ARS_NOTE_MAX_WS_CONNECTIONS_PER_IP=16
+      - ARS_NOTE_MAX_WS_MESSAGES_PER_MINUTE=1200
       - ARS_NOTE_STORAGE_BACKEND=local
       - ARS_NOTE_ALLOW_LEGACY_LIVE_WRITES=false
-      - ARS_NOTE_MAX_HTTP_BODY_BYTES=268435456
-      - ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES=268435456
+      - ARS_NOTE_MAX_HTTP_BODY_BYTES=67108864
+      - ARS_NOTE_MAX_WEBSOCKET_MESSAGE_BYTES=67108864
       - TZ=Asia/Shanghai
       - ARS_NOTE_TIMEZONE=Asia/Shanghai
     volumes:
       - ./server/dist:/app/dist:ro
       - ./sync-data:/app/server-data
     command: ["node", "dist/index.js"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "node", "-e", "const http=require('http');http.get('http://localhost:8787/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s

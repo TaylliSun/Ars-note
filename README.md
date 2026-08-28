@@ -19,7 +19,7 @@ Ars-note 是面向游戏开发团队的本地优先 Markdown 工作台，提供�
 
 ## 安装
 
-1. 下载 `Ars-note-Setup-1.5.69.exe`。
+1. 下载 `Ars-note-Setup-1.5.97.exe`。
 2. 校验发布页提供的 SHA256。
 3. 运行安装程序并选择安装目录。
 4. 首次启动后创建或打开一个 Vault。
@@ -41,9 +41,11 @@ NAS 发布包包含可直接运行的 `server/dist` 和 `docker-compose.nas.yml`
 
 ```powershell
 Copy-Item .env.example .env
-# 在 .env 中设置至少 16 个字符的 ARS_NOTE_SERVER_API_KEY
+# 在 .env 中设置至少 32 个随机字符的 ARS_NOTE_SERVER_API_KEY
 docker compose -f docker-compose.nas.yml up -d
 ```
+
+公网部署不能直接暴露 `8787`，必须使用 HTTPS/WSS 反向代理和 `docker-compose.public.yml`。完整步骤见 [公网同步部署](PUBLIC_DEPLOYMENT.md)。
 
 客户端只填写服务器根地址，例如：
 
@@ -67,7 +69,7 @@ npm run release:full
 
 ## 发布状态
 
-`v1.5.69` 是当前公开测试版。Windows 安装包暂未进行 Authenticode 签名，因此首次下载运行时可能出现 SmartScreen 提示。重要项目请继续保留独立备份，并在升级同步服务器前备份 `sync-data`。
+`v1.5.97` 是当前公开测试版。Windows 安装包暂未进行 Authenticode 签名，因此首次下载运行时可能出现 SmartScreen 提示。重要项目请继续保留独立备份，并在升级同步服务器前备份 `sync-data`。
 
 ## 许可证
 

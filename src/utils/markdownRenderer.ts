@@ -23,7 +23,7 @@ function decodeBasicHtml(value: string): string {
     .replace(/&amp;/g, '&');
 }
 
-function sanitizeColorValue(value: string): string | null {
+export function sanitizeColorValue(value: string): string | null {
   const color = value.trim();
   if (/^#[0-9a-fA-F]{3,8}$/.test(color)) return color;
   if (/^rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?(?:\s*,\s*(?:0|1|0?\.\d+|[\d.]+%))?\s*\)$/i.test(color)) return color;
@@ -65,6 +65,30 @@ function renderImage(alt: string, src: string, options: MarkdownRenderOptions): 
   return `<img class="md-img" src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(decodeBasicHtml(alt))}" />`;
 }
 
+export function sanitizeMarkdownHref(value: string): string | null {
+  const href = decodeBasicHtml(value).trim();
+  if (!href || /[\u0000-\u001f\u007f]/.test(href) || href.startsWith('//')) return null;
+
+  const protocolMatch = href.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (!protocolMatch) return href;
+  const protocol = protocolMatch[1].toLowerCase();
+  if (!['http', 'https', 'mailto'].includes(protocol)) return null;
+
+  try {
+    const parsed = new URL(href);
+    if ((protocol === 'http' || protocol === 'https') && (parsed.username || parsed.password)) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function renderMarkdownLink(label: string, rawHref: string): string {
+  const href = sanitizeMarkdownHref(rawHref);
+  if (!href) return `<span class="md-link md-link-invalid">${label}</span>`;
+  return `<a class="md-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${label}</a>`;
+}
+
 export function renderInlineMarkdown(text: string, options: MarkdownRenderOptions = {}): string {
   const codeSpans: string[] = [];
   const safeSpans: string[] = [];
@@ -84,7 +108,7 @@ export function renderInlineMarkdown(text: string, options: MarkdownRenderOption
 
   html = html
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, src) => renderImage(alt, src, options))
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => `<a class="md-link" href="${escapeHtml(decodeBasicHtml(href))}" target="_blank" rel="noreferrer">${label}</a>`)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => renderMarkdownLink(label, href))
     .replace(/\[\[([^\]]+)\]\]/g, (_match, wikiTarget) => renderPreviewWikiLink(wikiTarget))
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/__(.+?)__/g, '<strong>$1</strong>')

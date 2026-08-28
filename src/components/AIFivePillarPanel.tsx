@@ -155,7 +155,7 @@ const AIFivePillarPanel: React.FC<Props> = ({ vaultPath, api }) => {
             <span>Evolutions: {evolutions.length}</span>
           </div>
           {skills.length === 0 ? (
-            <div className="ai-pillar-empty">No skills yet. Skills are auto-generated when AI uses tools.</div>
+            <div className="ai-pillar-empty">No skills yet. Ars-note promotes a reusable Skill after the same workflow succeeds more than once.</div>
           ) : skills.map(sk => {
             const evo = evolutions.find((e: any) => e.skillId === sk.id);
             return (

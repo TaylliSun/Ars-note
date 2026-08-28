@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FileNode } from '../types';
 import { useI18n } from '../i18n';
 import FileTree from './FileTree';
-import { ArsLogoIcon, PlusIcon, SearchIcon, GraphIcon, BotIcon, BackupIcon, SettingsIcon, SunIcon, MoonIcon, TemplateIcon, BoardIcon, FileIcon, RefreshIcon, LocateIcon, CollapseIcon, FolderIcon, CloseIcon, ClockIcon } from './icons/ArsIcons';
+import { ArsLogoIcon, PlusIcon, SearchIcon, GraphIcon, BotIcon, BackupIcon, SettingsIcon, SunIcon, MoonIcon, TemplateIcon, BoardIcon, FileIcon, RefreshIcon, LocateIcon, CollapseIcon, FolderIcon, CloseIcon, ClockIcon, BalanceIcon } from './icons/ArsIcons';
 import { APP_VERSION_LABEL } from '../appVersion';
 
 interface SidebarProps {
@@ -315,6 +315,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           {onNavigateToTab && (
             <>
               {railAction('team-workspace', 'Ars-note 团队工作台', <ClockIcon size={17} />, () => onNavigateToTab('schedule'), activePanelTab === 'schedule')}
+              {railAction('balance-lab', '数值实验室', <BalanceIcon size={17} />, () => onNavigateToTab('balance'), activePanelTab === 'balance')}
               {railAction('graph', t.graph, <GraphIcon size={17} />, () => onNavigateToTab('graph'), activePanelTab === 'graph')}
               {railAction('ai', t.aiAssistant, <BotIcon size={17} />, () => onNavigateToTab('ai'), activePanelTab === 'ai')}
               {railAction('backup', t.backup, <BackupIcon size={17} />, () => onNavigateToTab('backup'), activePanelTab === 'backup')}
@@ -515,4 +516,4 @@ const Sidebar: React.FC<SidebarProps> = ({
   );
 };
 
-export default Sidebar;
+export default React.memo(Sidebar);

@@ -1,4 +1,4 @@
-# Ars-note v1.5.64 sync server Dockerfile.
+# Ars-note v1.5.67 sync server Dockerfile.
 # Multi-stage build: build TypeScript, then run with minimal image
 
 # ── Stage 1: Build ──

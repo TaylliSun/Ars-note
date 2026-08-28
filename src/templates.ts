@@ -32,122 +32,274 @@ const T: TmplDef[] = [
   descEn:'Full Game Design Document', descZh:'完整游戏设计文档',
   contentEn:`# Game Design Document: {TITLE}
 
-## 1. Overview
-- **Game Title**:
-- **Genre**:
-- **Platform**:
-- **Target Audience**:
-- **Estimated Release Date**:
+> Owner: Lead Design
+> Status: Draft / Review / Approved
+> Last updated: {DATE}
 
-## 2. Core Concept
-### Elevator Pitch
-> Describe your game in one or two sentences.
+## 1. Design Thesis and Evidence
 
-### Core Gameplay Loop
-1. ...
-2. ...
-3. ...
+- **Target player and play context**:
+- **Player promise / fantasy**:
+- **Elevator pitch**:
+- **Differentiator**:
+- **Experience pillars**:
+- **Non-goals**:
+- **Platform and constraints**:
 
-## 3. Game Mechanics
-### Player Actions
--
-### Progression System
--
-### Economy / Resources
--
+| Kind | Statement | Evidence / source | Status |
+| --- | --- | --- | --- |
+| Confirmed fact |  |  | Confirmed |
+| Design decision |  | Lead Design | Proposed |
+| Assumption |  | Prototype needed | Unverified |
+| Open question |  | Owner needed | Blocked |
 
-## 4. Story & Narrative
-### Premise
--
-### Main Characters
--
-### World Setting
--
+## 2. Connected Experience Horizons
 
-## 5. Art Style
-- **Visual Style**:
-- **Color Palette**:
-- **Reference Images**:
+| Horizon | Player goal | Entry | Main choice/action | Output | How it changes the returning player |
+| --- | --- | --- | --- | --- | --- |
+| Moment-to-moment |  |  |  |  |  |
+| Encounter / task |  |  |  |  |  |
+| Session |  |  |  |  |  |
+| Meta / progression |  |  |  |  |  |
+| Long-term mastery |  |  |  |  |  |
 
-## 6. Audio
-- **Music Style**:
-- **Key SFX**:
+## 3. Core Gameplay Loop
 
-## 7. Technical Notes
-- **Engine**: Unity
-- **Target Resolution**:
-- **Performance Budget**:
+> Because the player wants **[goal/fantasy]**, they choose and perform **[core verbs]**. The system resolves **[rules/risk]** and gives **[feedback + reward/cost]**. The player spends or transforms **[output/resource]** to unlock **[progression/new option]**, changing the next decision by **[mastery/expression/stakes]**, then explicitly re-enters through **[next goal]**.
 
-## 8. Monetization
--
+| # | Player intent / goal | Meaningful choice and action | Rule / state change | Immediate feedback | Reward / cost | Spend / transform | Progression / unlock | Changed next decision | Failure / recovery | Re-entry |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 |  |  |  |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |  |  |  |
 
-## 9. Milestones
-| Phase | Date | Deliverable |
-|-------|------|-------------|
-| Prototype | | |
-| Alpha | | |
-| Beta | | |
-| Release | | |
+> Combat, collection, construction, exploration, dialogue, and management are actions or subsystems. None is a complete loop until its output changes progression and creates the next goal and decision.
+
+## 4. System Topology
+
+| System | Role in core loop | Inputs | Player decisions | Outputs | Depends on | Feeds into | Failure / recovery | Owner |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |  |
+
+### System Contract
+
+For every major system define rules/state changes, data/config, feedback, edge cases, save/migration impact, tuning ownership, and acceptance evidence. Defer systems that cannot justify a core-loop role.
+
+## 5. Progression and Economy
+
+| Resource / state | Source | Transform | Storage / cap | Sink / cost | Gate / unlock | Reset / decay | Exploit pressure |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |
+
+| Phase | New option / verb | New decision | New risk | Content need | Why play changes |
+| --- | --- | --- | --- | --- | --- |
+| Onboarding |  |  |  |  |  |
+| Early |  |  |  |  |  |
+| Mid |  |  |  |  |  |
+| Late |  |  |  |  |  |
+
+## 6. Content and Challenge Progression
+
+- **Content structure and cadence**:
+- **Difficulty variables and pacing**:
+- **Early / mid / late variants**:
+- **Content production budget**:
+- **Repetition guard**: each repeat adds a decision, mastery opportunity, expression, or stake rather than only larger numbers.
+
+## 7. Failure, Recovery, and Return
+
+| Situation | Trigger | Consequence | Preserved progress | Recovery path | Retry cost | Re-entry condition |
+| --- | --- | --- | --- | --- | --- | --- |
+| Failure |  |  |  |  |  |  |
+| Interruption / quit |  |  |  |  |  |  |
+| Resource shortage |  |  |  |  |  |  |
+
+## 8. UX, Feedback, Art, and Audio
+
+- **Information hierarchy and player flow**:
+- **Input and accessibility**:
+- **State feedback: default / selected / loading / success / failure / recovery**:
+- **Visual direction supporting the experience pillars**:
+- **Animation, VFX, SFX, music, camera, and haptics by loop step**:
+
+## 9. World and Narrative Function
+
+- **Premise and world rules relevant to play**:
+- **Character motivation and player identification**:
+- **How narrative creates goals, stakes, choices, and feedback**:
+- **Quest / dialogue / performance dependencies**:
+
+## 10. Technology, Data, and Production
+
+- **Engine / platform / performance budget**:
+- **Runtime modules and data flow**:
+- **Configuration and authoring tools**:
+- **Save, synchronization, migration, and error recovery**:
+- **Asset and content pipeline**:
+
+| Milestone | Playable question answered | Deliverable | Owner | Dependency | Acceptance evidence |
+| --- | --- | --- | --- | --- | --- |
+| Prototype |  |  |  |  |  |
+| Vertical slice |  |  |  |  |  |
+| Alpha |  |  |  |  |  |
+
+## 11. Prototype, Telemetry, and Acceptance
+
+- **Smallest playable prototype**:
+- **Observation plan**:
+- **Telemetry events and interpretation**:
+- **Kill / continue / revise criteria**:
+- **QA and edge-case checklist**:
+
+| Design goal | Loop step | Supporting system / resource | UI feedback | Owner | Acceptance / telemetry |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
+## 12. Decision and Scope Ledger
+
+- **Added**:
+- **Changed**:
+- **Removed**:
+- **Deferred**:
+- **Rejected**:
+- **Net scope and schedule impact**:
+- **Review gates**: Passed / Needs review / Blocked
 
 ${foot}`,
-  contentZh:`# 游戏设计文档: {TITLE}
+  contentZh:`# 游戏设计文档：{TITLE}
 
-## 1. 概览
-- **游戏名称**：
-- **类型**：
-- **平台**：
-- **目标受众**：
-- **预计发布日期**：
+> 负责人：主策划
+> 状态：草案 / 评审 / 已批准
+> 最后更新：{DATE}
 
-## 2. 核心概念
-### 一句话介绍
-> 用一两句话描述你的游戏。
+## 1. 设计命题与依据
 
-### 核心玩法循环
-1. ...
-2. ...
-3. ...
+- **目标玩家与游玩场景**：
+- **玩家承诺 / 玩家幻想**：
+- **一句话介绍**：
+- **核心差异点**：
+- **体验支柱**：
+- **非目标**：
+- **平台与边界约束**：
 
-## 3. 游戏机制
-### 玩家操作
--
-### 进阶系统
--
-### 经济 / 资源
--
+| 类型 | 内容 | 依据 / 来源 | 状态 |
+| --- | --- | --- | --- |
+| 已确认事实 |  |  | 已确认 |
+| 设计决策 |  | 主策划 | 待评审 |
+| 假设 |  | 需要原型 | 未验证 |
+| 开放问题 |  | 待指定负责人 | 阻塞 |
 
-## 4. 故事与叙事
-### 前提
--
-### 主要角色
--
-### 世界设定
--
+## 2. 多层体验循环
 
-## 5. 美术风格
-- **视觉风格**：
-- **配色方案**：
-- **参考图**：
+| 时间层级 | 玩家目标 | 入口 | 主要选择 / 行动 | 产出 | 玩家返回后发生的变化 |
+| --- | --- | --- | --- | --- | --- |
+| 秒级 / 即时操作 |  |  |  |  |  |
+| 遭遇 / 任务 |  |  |  |  |  |
+| 单局 / 会话 |  |  |  |  |  |
+| 局外 / 成长 |  |  |  |  |  |
+| 长期精通 |  |  |  |  |  |
 
-## 6. 音频
-- **音乐风格**：
-- **关键音效**：
+## 3. 核心玩法循环
 
-## 7. 技术说明
-- **引擎**：Unity
-- **目标分辨率**：
-- **性能预算**：
+> 因为玩家追求 **[目标 / 幻想]**，所以会选择并执行 **[核心动词]**；系统根据 **[规则 / 风险]** 结算并提供 **[即时反馈 + 奖励 / 成本]**；玩家把 **[产出 / 资源]** 消耗、投入或转化为 **[成长 / 解锁 / 新选项]**，从而让下一轮产生 **[新的选择、策略、表达或风险]**，再通过 **[新目标]** 明确重入循环。
 
-## 8. 商业化
--
+| # | 玩家意图 / 目标 | 有意义的选择与行动 | 规则 / 状态变化 | 即时可读反馈 | 奖励 / 成本 | 消耗 / 投入 / 转化 | 成长 / 解锁 | 下一轮改变的决策 | 失败 / 恢复 | 重入条件 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 |  |  |  |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |  |  |  |
 
-## 9. 里程碑
-| 阶段 | 日期 | 交付物 |
-|------|------|--------|
-| 原型 | | |
-| Alpha | | |
-| Beta | | |
-| 正式发布 | | |
+> 战斗、采集、建造、探索、对话和经营只是行动或子系统。它们的产出只有进入成长并产生下一轮目标与决策后，才能构成闭环。
+
+## 4. 系统关系与依赖
+
+| 系统 | 在核心循环中的作用 | 输入 | 玩家决策 | 输出 | 依赖系统 | 输出流向 | 失败 / 恢复 | 负责人 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |  |
+
+### 系统说明契约
+
+每个主要系统都必须说明规则与状态变化、数据配置、反馈、边界情况、存档 / 迁移影响、调参负责人和验收依据。无法说明核心循环作用的系统应暂缓或移除。
+
+## 5. 成长与经济资源流
+
+| 资源 / 状态 | 来源 | 转化 | 储存 / 上限 | 消耗 / 去向 | 门槛 / 解锁 | 重置 / 衰减 | 套利风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |
+
+| 阶段 | 新动词 / 新选项 | 新决策 | 新风险 | 内容需求 | 玩法为何发生变化 |
+| --- | --- | --- | --- | --- | --- |
+| 新手期 |  |  |  |  |  |
+| 前期 |  |  |  |  |  |
+| 中期 |  |  |  |  |  |
+| 后期 |  |  |  |  |  |
+
+## 6. 内容与挑战推进
+
+- **内容结构与投放节奏**：
+- **难度变量与节奏曲线**：
+- **前 / 中 / 后期变化**：
+- **内容生产预算**：
+- **重复保护**：每次重复至少增加新的决策、熟练度、表达空间或风险，不能只提高数值。
+
+## 7. 失败、恢复与返回
+
+| 情况 | 触发条件 | 后果 | 保留进度 | 恢复路径 | 重试成本 | 重入条件 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 失败 |  |  |  |  |  |  |
+| 中断 / 退出 |  |  |  |  |  |  |
+| 资源不足 |  |  |  |  |  |  |
+
+## 8. 交互反馈、美术与音频
+
+- **信息层级与玩家流程**：
+- **输入方式与可访问性**：
+- **默认 / 选中 / 加载 / 成功 / 失败 / 恢复状态反馈**：
+- **支撑体验支柱的视觉方向**：
+- **各循环步骤的动画、VFX、SFX、音乐、镜头与震动**：
+
+## 9. 世界观与叙事作用
+
+- **与玩法直接相关的前提与世界规则**：
+- **角色动机与玩家代入**：
+- **叙事如何产生目标、风险、选择与反馈**：
+- **任务、台词与演出依赖**：
+
+## 10. 技术、数据与生产
+
+- **引擎 / 平台 / 性能预算**：
+- **运行时模块与数据流**：
+- **配置结构与生产工具**：
+- **存档、同步、迁移与错误恢复**：
+- **资产与内容生产管线**：
+
+| 里程碑 | 要回答的可玩问题 | 交付物 | 负责人 | 依赖 | 验收依据 |
+| --- | --- | --- | --- | --- | --- |
+| 原型 |  |  |  |  |  |
+| 垂直切片 |  |  |  |  |  |
+| Alpha |  |  |  |  |  |
+
+## 11. 原型、埋点与验收
+
+- **最小可玩原型**：
+- **观察计划**：
+- **埋点事件与结果解释**：
+- **继续 / 修改 / 停止条件**：
+- **QA 与边界回归清单**：
+
+| 设计目标 | 循环步骤 | 支撑系统 / 资源 | UI 反馈 | 负责人 | 验收 / 埋点证据 |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
+## 12. 决策与范围账本
+
+- **新增**：
+- **修改**：
+- **移除**：
+- **暂缓**：
+- **否决**：
+- **净范围与工期影响**：
+- **评审门禁**：Passed / Needs review / Blocked
 
 ${footZh}` },
 

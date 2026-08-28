@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useImperativeHandle, forwardRef, useCallback, useState, useMemo } from 'react';
 import type { EditorHandle } from './Editor';
 import { FileIcon } from './icons/ArsIcons';
+import { escapeHtml, sanitizeColorValue, sanitizeMarkdownHref } from '../utils/markdownRenderer';
 
 interface LiveEditorProps {
   content: string;
@@ -14,7 +15,7 @@ interface LiveEditorProps {
    ═══════════════════════════════════════════════════════════ */
 
 function escHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escapeHtml(s);
 }
 
 function inlineMd(text: string): string {
@@ -22,13 +23,21 @@ function inlineMd(text: string): string {
   // Wiki-links [[file]]
   h = h.replace(/\[\[([^\]]+)\]\]/g, '<span class="wiki-link" data-wiki="$1">$1</span>');
   h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" />');
-  h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, rawHref) => {
+    const href = sanitizeMarkdownHref(rawHref);
+    return href
+      ? `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${label}</a>`
+      : `<span class="md-link-invalid">${label}</span>`;
+  });
   h = h.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
   h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   h = h.replace(/\*(.+?)\*/g, '<em>$1</em>');
   h = h.replace(/~~(.+?)~~/g, '<del>$1</del>');
   h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-  h = h.replace(/&lt;span style=&quot;color:([^&]+)&quot;&gt;(.+?)&lt;\/span&gt;/g, '<span style="color:$1">$2</span>');
+  h = h.replace(/&lt;span style=&quot;color:([^&]+)&quot;&gt;(.+?)&lt;\/span&gt;/g, (_match, rawColor, inner) => {
+    const color = sanitizeColorValue(rawColor);
+    return color ? `<span style="color:${color}">${inner}</span>` : inner;
+  });
   return h;
 }
 

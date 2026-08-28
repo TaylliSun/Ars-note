@@ -1,5 +1,5 @@
 /* ──────────────────────────────────────────────────────
-   GraphView.tsx — Obsidian-like Force-Directed Knowledge Graph
+   GraphView.tsx - Ars-note force-directed knowledge graph
    v2.0.0 — Live physics simulation, node dragging, spring/bouncy feel
    ────────────────────────────────────────────────────── */
 
@@ -29,7 +29,7 @@ const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.2;
 
-/* Physics tuning — smooth, organic, Obsidian-like feel */
+/* Physics tuning - smooth, controlled Ars-note interaction */
 const REPULSION = 820;        // base repulsion (scales with node count)
 const DAMPING = 0.82;         // lower = faster energy loss
 const CENTER_PULL = 0.006;    // gentle center gravity

@@ -54,7 +54,7 @@ async function fetchLiveFile(port, relativePath) {
   return data.file;
 }
 
-function startServer(serverEntry, cwd, port) {
+function startServer(serverEntry, cwd, port, envOverrides = {}) {
   const child = spawn(process.execPath, [serverEntry], {
     cwd,
     env: {
@@ -64,6 +64,7 @@ function startServer(serverEntry, cwd, port) {
       ARS_NOTE_SERVER_API_KEY: API_KEY,
       ARS_NOTE_STORAGE_BACKEND: 'local',
       ARS_NOTE_SERVER_EXPORT_AUTO: 'false',
+      ...envOverrides,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -111,6 +112,85 @@ test('public deployment mode refuses to start without a strong API key', { timeo
   const [code] = await once(child, 'exit');
   assert.notEqual(code, 0);
   assert.match(logs, /requires ARS_NOTE_SERVER_API_KEY with at least 16 characters/);
+});
+
+test('public security mode requires HTTPS proxy metadata and exposes hardened headers', { timeout: 10000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ars-note-public-security-'));
+  const serverEntry = path.resolve('dist/index.js');
+  const port = await getFreePort();
+  const strongKey = 'public-integration-key-0123456789abcdef';
+  const child = startServer(serverEntry, tempDir, port, {
+    ARS_NOTE_SERVER_API_KEY: strongKey,
+    ARS_NOTE_SECURITY_MODE: 'public',
+    ARS_NOTE_TRUST_PROXY: 'true',
+  });
+  try {
+    await waitForHealth(port, child);
+
+    const plain = await fetch(`http://127.0.0.1:${port}/api/version`);
+    assert.equal(plain.status, 426);
+
+    const secure = await fetch(`http://127.0.0.1:${port}/api/version`, {
+      headers: {
+        Origin: 'null',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'sync.example.com',
+      },
+    });
+    const data = await secure.json();
+    assert.equal(secure.status, 200);
+    assert.equal(data.security.mode, 'public');
+    assert.equal(data.security.httpsRequired, true);
+    assert.equal(data.security.apiKeyInQueryAllowed, false);
+    assert.equal(secure.headers.get('access-control-allow-origin'), 'null');
+    assert.match(secure.headers.get('strict-transport-security') || '', /max-age=/);
+    assert.equal(secure.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(secure.headers.get('cache-control'), 'no-store');
+
+    const disallowedOrigin = await fetch(`http://127.0.0.1:${port}/api/live-sync/status`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://attacker.example',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'sync.example.com',
+      },
+    });
+    assert.equal(disallowedOrigin.status, 403);
+  } catch (error) {
+    throw new Error(`${error.message}\nServer logs:\n${child.getLogs()}`);
+  } finally {
+    await stopServer(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('authentication failures are rate-limited per client address', { timeout: 10000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ars-note-auth-limit-'));
+  const serverEntry = path.resolve('dist/index.js');
+  const port = await getFreePort();
+  const child = startServer(serverEntry, tempDir, port, {
+    ARS_NOTE_AUTH_FAILURE_LIMIT: '3',
+    ARS_NOTE_AUTH_BLOCK_SECONDS: '30',
+  });
+  try {
+    await waitForHealth(port, child);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/live-sync/status`, {
+        headers: { Authorization: 'Bearer definitely-wrong' },
+      });
+      assert.equal(response.status, 401);
+    }
+    const blocked = await fetch(`http://127.0.0.1:${port}/api/live-sync/status`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    assert.equal(blocked.status, 429);
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+  } catch (error) {
+    throw new Error(`${error.message}\nServer logs:\n${child.getLogs()}`);
+  } finally {
+    await stopServer(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 function createMaskedFrame(payload) {
@@ -213,7 +293,6 @@ async function connectClient(port, deviceId) {
     const key = crypto.randomBytes(16).toString('base64');
     const query = new URLSearchParams({
       vaultId: VAULT_ID,
-      apiKey: API_KEY,
       deviceId,
       deviceName: deviceId,
       appVersion: '1.5.62',
@@ -224,6 +303,7 @@ async function connectClient(port, deviceId) {
       port,
       path: `/ws/live-sync?${query}`,
       headers: {
+        Authorization: `Bearer ${API_KEY}`,
         Upgrade: 'websocket',
         Connection: 'Upgrade',
         'Sec-WebSocket-Key': key,
@@ -240,6 +320,54 @@ async function connectClient(port, deviceId) {
     req.end();
   });
 }
+
+async function webSocketHandshakeStatus(port, { headerKey = '', queryKey = '' } = {}) {
+  return new Promise((resolve, reject) => {
+    const key = crypto.randomBytes(16).toString('base64');
+    const query = new URLSearchParams({ vaultId: VAULT_ID });
+    if (queryKey) query.set('apiKey', queryKey);
+    const headers = {
+      Upgrade: 'websocket',
+      Connection: 'Upgrade',
+      'Sec-WebSocket-Key': key,
+      'Sec-WebSocket-Version': '13',
+    };
+    if (headerKey) headers.Authorization = `Bearer ${headerKey}`;
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: `/ws/live-sync?${query}`,
+      headers,
+    });
+    req.once('upgrade', (res, socket) => {
+      socket.destroy();
+      resolve(res.statusCode || 101);
+    });
+    req.once('response', (res) => {
+      res.resume();
+      resolve(res.statusCode || 0);
+    });
+    req.once('error', reject);
+    req.end();
+  });
+}
+
+test('WebSocket credentials are accepted in headers and rejected in URLs', { timeout: 10000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ars-note-ws-auth-'));
+  const serverEntry = path.resolve('dist/index.js');
+  const port = await getFreePort();
+  const child = startServer(serverEntry, tempDir, port);
+  try {
+    await waitForHealth(port, child);
+    assert.equal(await webSocketHandshakeStatus(port, { queryKey: API_KEY }), 401);
+    assert.equal(await webSocketHandshakeStatus(port, { headerKey: API_KEY }), 101);
+  } catch (error) {
+    throw new Error(`${error.message}\nServer logs:\n${child.getLogs()}`);
+  } finally {
+    await stopServer(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 function changeMessage(snapshot, action, content, base, updatedAt, source = action) {
   const contentBuffer = Buffer.from(content || '', 'utf8');

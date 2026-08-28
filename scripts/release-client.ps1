@@ -1,5 +1,6 @@
 param(
   [switch]$SkipChecks,
+  [switch]$SkipSmoke,
   [string]$OutputDir
 )
 
@@ -31,8 +32,11 @@ function Invoke-Checked {
 if (-not $SkipChecks) {
   Invoke-Checked "Run client regression tests" "npm.cmd" @("test")
   Invoke-Checked "Type check desktop client" "npm.cmd" @("run", "typecheck")
-  Invoke-Checked "Build desktop client" "npm.cmd" @("run", "build")
 }
+
+# A release must always rebuild production assets. SkipChecks only skips the
+# slower validation commands; it must never allow stale dist files into NSIS.
+Invoke-Checked "Build desktop client" "npm.cmd" @("run", "build")
 
 New-Item -ItemType Directory -Force -Path $ReleaseOut | Out-Null
 $Builder = Join-Path $Root "node_modules\.bin\electron-builder.cmd"
@@ -46,6 +50,29 @@ Invoke-Checked "Package Windows desktop installer" $Builder @(
   "--x64",
   "--config.directories.output=$ReleaseOut"
 )
+
+if (-not $SkipSmoke) {
+  $PackagedExecutable = Join-Path $ReleaseOut "win-unpacked\Ars-note.exe"
+  if (-not (Test-Path -LiteralPath $PackagedExecutable -PathType Leaf)) {
+    throw "Packaged executable is missing: $PackagedExecutable"
+  }
+  $PreviousSmokeExecutable = $env:ARS_NOTE_SMOKE_EXECUTABLE
+  $PreviousLargeDocumentSmoke = $env:ARS_NOTE_LARGE_DOCUMENT_SMOKE
+  try {
+    $env:ARS_NOTE_SMOKE_EXECUTABLE = $PackagedExecutable
+    $env:ARS_NOTE_LARGE_DOCUMENT_SMOKE = "1"
+    try {
+      Invoke-Checked "Run packaged large-document smoke test" "node.exe" @("scripts/electron-smoke.mjs")
+    } catch {
+      Write-Warning "The first packaged smoke launch failed. Waiting for Windows file scanning to settle, then retrying once."
+      Start-Sleep -Milliseconds 1500
+      Invoke-Checked "Retry packaged large-document smoke test" "node.exe" @("scripts/electron-smoke.mjs")
+    }
+  } finally {
+    $env:ARS_NOTE_SMOKE_EXECUTABLE = $PreviousSmokeExecutable
+    $env:ARS_NOTE_LARGE_DOCUMENT_SMOKE = $PreviousLargeDocumentSmoke
+  }
+}
 
 $InstallerPath = Join-Path $ReleaseOut "Ars-note-Setup-$Version.exe"
 & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "verify-client-release.ps1") `
