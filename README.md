@@ -4,6 +4,39 @@ Ars-note 是面向游戏开发团队的本地优先 Markdown 工作台，提供�
 
 [免费下载 Windows 版本](https://github.com/TaylliSun/Ars-note/releases/latest) · [问题反馈](https://github.com/TaylliSun/Ars-note/issues) · [安全说明](SECURITY.md)
 
+## 产品预览
+
+<p align="center">
+  <a href="docs/images/ars-note-workspace.png">
+    <img src="docs/images/ars-note-workspace.png" alt="Ars-note 文档工作区与文档雷达" width="100%">
+  </a>
+</p>
+
+<p align="center"><sub>本地 GDD 编辑、文件导航、Live Preview 与项目文档雷达集中在同一个工作区。</sub></p>
+
+<table>
+  <tr>
+    <th width="50%">思维导图</th>
+    <th width="50%">AI 策划助手</th>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/images/ars-note-mind-map.png">
+        <img src="docs/images/ars-note-mind-map.png" alt="Ars-note 双向思维导图与大纲">
+      </a>
+    </td>
+    <td>
+      <a href="docs/images/ars-note-ai-assistant.png">
+        <img src="docs/images/ars-note-ai-assistant.png" alt="Ars-note AI 游戏策划审查助手">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td>双向分支、自动整理、搜索、大纲和键盘创作。</td>
+    <td>结合当前 GDD 和团队上下文进行专业审查与修改建议。</td>
+  </tr>
+</table>
+
 ## 支持平台
 
 - Windows 10/11 x64
